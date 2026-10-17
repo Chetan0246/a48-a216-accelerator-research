@@ -1,7 +1,8 @@
 import pytest
+
 from accelerator_sim.kv_cache import (
-    KVCacheShape,
     KVCacheModel,
+    KVCacheShape,
     calculate_kv_bytes_per_token,
     calculate_kv_cache_per_sequence_gb,
     calculate_kv_cache_total_gb,
@@ -46,8 +47,33 @@ def test_kv_cache_model_wrapper_and_overhead():
 
 def test_kv_cache_invalid_inputs():
     with pytest.raises(ValueError):
-        calculate_kv_bytes_per_token(KVCacheShape(num_layers=0, num_kv_heads=8, head_dim=128))
+        KVCacheShape(num_layers=0, num_kv_heads=8, head_dim=128)
     with pytest.raises(ValueError):
+        KVCacheShape(num_layers=48, num_kv_heads=8, head_dim=128, overhead_percent=-1.0)
+    with pytest.raises(ValueError, match="finite number"):
+        KVCacheShape(num_layers=48, num_kv_heads=8, head_dim=128, precision_bits=float("nan"))
+    with pytest.raises(ValueError, match="positive finite integer"):
         calculate_kv_cache_per_sequence_gb(KVCacheShape(num_layers=48, num_kv_heads=8, head_dim=128), context_length=-1)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="positive finite integer"):
+        calculate_kv_cache_per_sequence_gb(KVCacheShape(num_layers=48, num_kv_heads=8, head_dim=128), context_length=float("nan"))
+    with pytest.raises(ValueError, match="positive finite integer"):
         calculate_kv_cache_total_gb(KVCacheShape(num_layers=48, num_kv_heads=8, head_dim=128), context_length=2048, batch_size=0)
+    with pytest.raises(ValueError, match="positive finite integer"):
+        calculate_kv_cache_total_gb(KVCacheShape(num_layers=48, num_kv_heads=8, head_dim=128), context_length=2048, batch_size=float("inf"))
+
+
+def test_kv_cache_mla_and_unsupported_attention_rejection():
+    from accelerator_sim.kv_cache import UnsupportedAttentionTypeError
+
+    mla_shape = KVCacheShape(num_layers=28, num_kv_heads=16, head_dim=128, attention_type="mla")
+    with pytest.raises(UnsupportedAttentionTypeError, match="Multi-Head Latent Attention"):
+        calculate_kv_bytes_per_token(mla_shape)
+
+    latent_shape = KVCacheShape(num_layers=28, num_kv_heads=16, head_dim=128, attention_type="latent")
+    with pytest.raises(UnsupportedAttentionTypeError, match="Multi-Head Latent Attention"):
+        calculate_kv_bytes_per_token(latent_shape)
+
+    weird_shape = KVCacheShape(num_layers=28, num_kv_heads=16, head_dim=128, attention_type="unknown_attention")
+    with pytest.raises(UnsupportedAttentionTypeError, match="Unsupported attention type"):
+        calculate_kv_bytes_per_token(weird_shape)
+

@@ -1,5 +1,7 @@
 """Decode phase memory-bandwidth ceiling and token throughput modeling."""
 
+from __future__ import annotations
+
 import math
 from dataclasses import dataclass
 
@@ -45,6 +47,16 @@ def calculate_decode_bandwidth_ceiling(
     Returns:
         DecodeCeiling containing aggregate and per-sequence tokens/s.
     """
+    for name, val in [
+        ("peak_bandwidth_tb_s", peak_bandwidth_tb_s),
+        ("effective_bandwidth_fraction", effective_bandwidth_fraction),
+        ("weight_traffic_gb", weight_traffic_gb),
+        ("kv_cache_per_sequence_gb", kv_cache_per_sequence_gb),
+        ("batch_size", batch_size),
+    ]:
+        if not math.isfinite(val):
+            raise ValueError(f"{name} must be a finite number, got {val}")
+
     if peak_bandwidth_tb_s <= 0:
         raise ValueError("peak_bandwidth_tb_s must be positive")
     if not (0.0 < effective_bandwidth_fraction <= 1.0):

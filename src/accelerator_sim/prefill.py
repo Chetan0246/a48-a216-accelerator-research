@@ -1,7 +1,9 @@
 """Prefill (prompt processing) compute requirements and latency estimation."""
 
+from __future__ import annotations
+
+import math
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -13,9 +15,9 @@ class PrefillEstimate:
     dense_equivalent_tflop: float
     target_ttft_seconds: float
     required_effective_tflops: float
-    peak_tflops: Optional[float] = None
-    compute_utilization: Optional[float] = None
-    idealized_ttft_seconds: Optional[float] = None
+    peak_tflops: float | None = None
+    compute_utilization: float | None = None
+    idealized_ttft_seconds: float | None = None
 
 
 def calculate_prefill_tflop(
@@ -37,6 +39,10 @@ def calculate_prefill_tflop(
     Returns:
         Total prefill FLOPs in TFLOP.
     """
+    for name, val in [("params_b", params_b), ("prompt_tokens", prompt_tokens), ("batch_size", batch_size)]:
+        if not math.isfinite(val):
+            raise ValueError(f"{name} must be a finite number, got {val}")
+
     if params_b <= 0 or prompt_tokens <= 0 or batch_size <= 0:
         raise ValueError("params_b, prompt_tokens, and batch_size must be positive")
     return (2.0 * params_b * prompt_tokens * batch_size) / 1000.0
@@ -58,6 +64,10 @@ def calculate_required_prefill_throughput(
     Returns:
         Required effective compute throughput in TFLOP/s.
     """
+    for name, val in [("prefill_tflop", prefill_tflop), ("target_ttft_seconds", target_ttft_seconds)]:
+        if not math.isfinite(val):
+            raise ValueError(f"{name} must be a finite number, got {val}")
+
     if prefill_tflop <= 0 or target_ttft_seconds <= 0:
         raise ValueError("prefill_tflop and target_ttft_seconds must be positive")
     return prefill_tflop / target_ttft_seconds
@@ -77,6 +87,17 @@ def estimate_prefill(
         This is a first-order analytical model based on dense matrix multiplications (2 * P * S * B).
         Attention quadratics, logits, batching overheads, and kernel scheduling are omitted.
     """
+    for name, val in [
+        ("params_b", params_b),
+        ("prompt_tokens", prompt_tokens),
+        ("target_ttft_seconds", target_ttft_seconds),
+        ("batch_size", batch_size),
+        ("peak_tflops", peak_tflops),
+        ("compute_utilization", compute_utilization),
+    ]:
+        if not math.isfinite(val):
+            raise ValueError(f"{name} must be a finite number, got {val}")
+
     if peak_tflops < 0:
         raise ValueError("peak_tflops cannot be negative")
     if peak_tflops > 0 and not (0 < compute_utilization <= 1.0):

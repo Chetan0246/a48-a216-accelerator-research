@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+
 import pandas as pd
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -11,21 +12,18 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from accelerator_sim.capacity import (
-    calculate_stored_weights_gb,
-    calculate_usable_memory_gb,
     evaluate_capacity,
 )
+from accelerator_sim.decode import calculate_decode_bandwidth_ceiling
 from accelerator_sim.kv_cache import (
     KVCacheShape,
     calculate_kv_cache_per_sequence_gb,
-    calculate_kv_cache_total_gb,
 )
+from accelerator_sim.moe import evaluate_moe_decode
 from accelerator_sim.prefill import (
     calculate_prefill_tflop,
     calculate_required_prefill_throughput,
 )
-from accelerator_sim.decode import calculate_decode_bandwidth_ceiling
-from accelerator_sim.moe import evaluate_moe_decode
 
 
 def main():
@@ -53,6 +51,17 @@ def main():
         runtime_reserve_gb = float(sys_cfg.get("runtime_reserve_gb", 4.0))
 
         for wl_name, wl_cfg in workloads.items():
+            is_complete = bool(wl_cfg.get("is_complete", True))
+            attention_type = str(wl_cfg.get("attention_type", "gqa")).lower()
+
+            if not is_complete or attention_type in ("mla", "latent"):
+                print(
+                    f"Notice: Workload '{wl_name}' is marked incomplete ({wl_cfg.get('status', 'incomplete')}) "
+                    f"with attention_type='{attention_type}'. Excluding from standard K/V cache and decode "
+                    "calculations until dedicated architecture modeling is implemented."
+                )
+                continue
+
             params_b = float(wl_cfg["total_parameters_b"])
             bits_per_param = float(wl_cfg.get("bits_per_param", 4.5))
             layers = int(wl_cfg["num_layers"])
@@ -61,6 +70,7 @@ def main():
             is_moe = bool(wl_cfg.get("is_moe", False))
             experts = int(wl_cfg.get("num_experts", 1))
             top_k = int(wl_cfg.get("experts_per_token", 1))
+            shared_params_b = float(wl_cfg.get("shared_params_b", 0.0))
 
             context_len = int(wl_cfg.get("default_context_len", 8192))
             kv_shape = KVCacheShape(
@@ -68,6 +78,7 @@ def main():
                 num_kv_heads=kv_heads,
                 head_dim=head_dim,
                 precision_bits=16.0,
+                attention_type=attention_type,
             )
             kv_per_seq_gb = calculate_kv_cache_per_sequence_gb(kv_shape, context_len)
 
@@ -113,7 +124,7 @@ def main():
                         total_experts=experts,
                         resident_experts=experts,
                         top_k=top_k,
-                        shared_params_b=0.0,
+                        shared_params_b=shared_params_b,
                         total_params_b=params_b,
                         bits_per_param=bits_per_param,
                         batch_size=b,

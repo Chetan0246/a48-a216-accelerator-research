@@ -15,7 +15,10 @@
     "experts_per_token": 1,
     "default_context_len": 8192,
     "default_gen_len": 256,
-    "bits_per_param": 4.5
+    "bits_per_param": 4.5,
+    "attention_type": "gqa",
+    "is_complete": true,
+    "status": "supported"
   },
   "llama-3-8b": {
     "name": "Llama-3-8B",
@@ -33,7 +36,10 @@
     "experts_per_token": 1,
     "default_context_len": 2048,
     "default_gen_len": 256,
-    "bits_per_param": 4.5
+    "bits_per_param": 4.5,
+    "attention_type": "gqa",
+    "is_complete": true,
+    "status": "supported"
   },
   "llama-3-70b": {
     "name": "Llama-3-70B",
@@ -51,7 +57,10 @@
     "experts_per_token": 1,
     "default_context_len": 2048,
     "default_gen_len": 256,
-    "bits_per_param": 4.5
+    "bits_per_param": 4.5,
+    "attention_type": "gqa",
+    "is_complete": true,
+    "status": "supported"
   },
   "mixtral-8x7b": {
     "name": "Mixtral-8x7B",
@@ -69,7 +78,12 @@
     "experts_per_token": 2,
     "default_context_len": 2048,
     "default_gen_len": 256,
-    "bits_per_param": 4.5
+    "bits_per_param": 4.5,
+    "attention_type": "gqa",
+    "shared_params_b": 1.5,
+    "routed_expert_params_b": 45.2,
+    "is_complete": true,
+    "status": "supported"
   },
   "deepseek-v2-lite": {
     "name": "DeepSeek-V2-Lite",
@@ -87,6 +101,10 @@
     "experts_per_token": 6,
     "default_context_len": 2048,
     "default_gen_len": 256,
-    "bits_per_param": 4.5
+    "bits_per_param": 4.5,
+    "attention_type": "mla",
+    "is_complete": false,
+    "status": "incomplete_mla_deferred",
+    "notes": "Multi-Head Latent Attention (MLA) and DeepSeekMoE architecture deferred. Do not evaluate standard K/V cache or decode until dedicated MLA compressor and shared-expert routing models are implemented."
   }
 }

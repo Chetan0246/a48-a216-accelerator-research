@@ -1,4 +1,5 @@
 import pytest
+
 from accelerator_sim.moe import (
     calculate_expected_expert_union,
     evaluate_moe_decode,
@@ -156,3 +157,18 @@ def test_moe_invalid_inputs():
             card_sustained_bw_tb_s=1.4336,
             routing_skew_factor=0.8,
         )
+    with pytest.raises(ValueError, match="finite number"):
+        calculate_expected_expert_union(expert_count=64, top_k=2, batch_size=float("nan"))
+    with pytest.raises(ValueError, match="finite number"):
+        evaluate_moe_decode(
+            total_experts=64,
+            resident_experts=64,
+            top_k=2,
+            shared_params_b=float("nan"),
+            total_params_b=40.0,
+            bits_per_param=4.5,
+            batch_size=8,
+            kv_cache_per_sequence_gb=1.6,
+            card_sustained_bw_tb_s=1.4336,
+        )
+

@@ -1,5 +1,8 @@
 """Memory capacity modeling for model weights, KV cache, and usable headroom."""
 
+from __future__ import annotations
+
+import math
 from dataclasses import dataclass
 
 
@@ -14,6 +17,8 @@ def calculate_stored_weights_gb(params_b: float, bits_per_param: float = 4.5) ->
     Returns:
         Stored weight memory in decimal GB (1e9 bytes).
     """
+    if not math.isfinite(params_b) or not math.isfinite(bits_per_param):
+        raise ValueError("params_b and bits_per_param must be finite numbers")
     if params_b <= 0 or bits_per_param <= 0:
         raise ValueError("params_b and bits_per_param must be positive")
     return (params_b * bits_per_param) / 8.0
@@ -30,9 +35,11 @@ def calculate_usable_memory_gb(physical_memory_gb: float, runtime_reserve_gb: fl
         Usable memory in decimal GB.
 
     Raises:
-        ValueError: If physical_memory_gb <= 0, runtime_reserve_gb < 0, or
-            runtime_reserve_gb >= physical_memory_gb.
+        ValueError: If physical_memory_gb <= 0, runtime_reserve_gb < 0,
+            runtime_reserve_gb >= physical_memory_gb, or inputs are not finite.
     """
+    if not math.isfinite(physical_memory_gb) or not math.isfinite(runtime_reserve_gb):
+        raise ValueError("physical_memory_gb and runtime_reserve_gb must be finite numbers")
     if physical_memory_gb <= 0:
         raise ValueError("physical_memory_gb must be positive")
     if runtime_reserve_gb < 0:
@@ -83,8 +90,18 @@ def evaluate_capacity(
         CapacityEvaluation breakdown.
 
     Raises:
-        ValueError: If inputs are invalid or runtime_reserve_gb >= physical_memory_gb.
+        ValueError: If inputs are invalid, non-finite, or runtime_reserve_gb >= physical_memory_gb.
     """
+    for name, val in [
+        ("physical_memory_gb", physical_memory_gb),
+        ("params_b", params_b),
+        ("kv_cache_gb", kv_cache_gb),
+        ("bits_per_param", bits_per_param),
+        ("runtime_reserve_gb", runtime_reserve_gb),
+    ]:
+        if not math.isfinite(val):
+            raise ValueError(f"{name} must be a finite number, got {val}")
+
     if physical_memory_gb <= 0:
         raise ValueError("physical_memory_gb must be positive")
     if params_b <= 0 or bits_per_param <= 0:

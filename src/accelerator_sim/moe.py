@@ -15,9 +15,11 @@ Assumptions and architectural boundaries:
     5. Fixed residency: A fixed subset of experts is resident in accelerator memory.
     6. Resident shared weights: All attention, embedding, and shared MLP parameters reside on-chip.
 """
+from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+
 from .capacity import calculate_stored_weights_gb
 
 
@@ -41,6 +43,10 @@ def calculate_expected_expert_union(
     Returns:
         Expected number of distinct active experts.
     """
+    for name, val in [("expert_count", expert_count), ("top_k", top_k), ("batch_size", batch_size)]:
+        if not math.isfinite(val):
+            raise ValueError(f"{name} must be a finite number, got {val}")
+
     if expert_count <= 0:
         raise ValueError("expert_count must be positive")
     if top_k <= 0 or top_k > expert_count:
@@ -117,6 +123,23 @@ def evaluate_moe_decode(
     Returns:
         MoEOffloadResult with complete breakdown and ceilings.
     """
+    for name, val in [
+        ("total_experts", total_experts),
+        ("resident_experts", resident_experts),
+        ("top_k", top_k),
+        ("shared_params_b", shared_params_b),
+        ("total_params_b", total_params_b),
+        ("bits_per_param", bits_per_param),
+        ("batch_size", batch_size),
+        ("kv_cache_per_sequence_gb", kv_cache_per_sequence_gb),
+        ("card_sustained_bw_tb_s", card_sustained_bw_tb_s),
+        ("host_bw_tb_s", host_bw_tb_s),
+        ("host_latency_ms", host_latency_ms),
+        ("routing_skew_factor", routing_skew_factor),
+    ]:
+        if not math.isfinite(val):
+            raise ValueError(f"{name} must be a finite number, got {val}")
+
     if total_params_b <= 0 or bits_per_param <= 0:
         raise ValueError("total_params_b and bits_per_param must be positive")
     if shared_params_b < 0 or shared_params_b >= total_params_b:

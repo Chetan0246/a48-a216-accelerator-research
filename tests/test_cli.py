@@ -1,6 +1,5 @@
-import io
-import sys
 import pytest
+
 from accelerator_sim.cli import main
 
 
@@ -53,3 +52,13 @@ def test_cli_moe_run(capsys):
     assert "MIXTURE-OF-EXPERTS TOPOLOGY & UNION" in captured
     # Batch 4 union for 64 exp, top-2 should be approx 7.6328
     assert "7.6328" in captured
+
+
+def test_cli_incomplete_workload_rejection():
+    test_args = [
+        "--system", "A48",
+        "--workload", "deepseek-v2-lite",
+    ]
+    with pytest.raises(ValueError, match="incomplete.*mla"):
+        main(test_args)
+

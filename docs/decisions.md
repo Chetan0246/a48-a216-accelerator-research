@@ -12,8 +12,13 @@
 - **Decision**: Implement separate simulation modules (`prefill.py` and `decode.py`) with shared hardware rooflines and KV cache specifications.
 - **Consequences**: Clearer attribution of latency bottlenecks and clean mapping to serving metrics (TTFT vs TPOT).
 
-## ADR-003: GQA and PagedAttention Overhead Inclusion
+## ADR-003: Attention Mechanisms and KV-Cache Overhead Accounting
 - **Status**: Accepted
-- **Context**: Modern models (Llama-3, Mixtral) use Grouped-Query Attention (GQA), and inference servers use paging systems that incur metadata and block-fragmentation overhead.
-- **Decision**: Model `num_kv_heads` independently from `num_attention_heads` and incorporate a default 5% paging memory overhead parameter in `KVCacheModel`.
-- **Consequences**: Accurate capacity projection preventing optimistic out-of-memory underestimations.
+- **Context**: Modern architectures employ diverse attention strategies (GQA, MQA, MLA) and serving runtimes use paging algorithms (e.g., PagedAttention) that incur block table and internal fragmentation overhead.
+- **Decision**:
+  1. Distinguish pure analytical tensor footprint from runtime paging structures.
+  2. The default mathematical baseline for `KVCacheShape` is set to `overhead_percent = 0.0%` (unpadded tensor size).
+  3. A configurable `overhead_percent` parameter (with 5.0% recommended for PagedAttention allocation buffers) is available for serving-system capacity projections.
+  4. Standard K/V cache formulas are restricted to MHA, GQA, and MQA. Compressed latent architectures such as MLA (e.g. DeepSeek-V2) must be explicitly flagged and deferred to avoid invalid capacity projections.
+- **Consequences**: Eliminates silent discrepancy between analytical reference calculations (0% overhead) and systems projections, and protects against applying standard formulas to latent attention mechanisms.
+

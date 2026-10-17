@@ -1,4 +1,5 @@
 import pytest
+
 from accelerator_sim.prefill import (
     calculate_prefill_tflop,
     calculate_required_prefill_throughput,
@@ -44,3 +45,10 @@ def test_prefill_invalid_inputs():
         calculate_required_prefill_throughput(prefill_tflop=500.0, target_ttft_seconds=0.0)
     with pytest.raises(ValueError):
         estimate_prefill(params_b=32.0, prompt_tokens=8192, peak_tflops=300.0, compute_utilization=1.5)
+    with pytest.raises(ValueError, match="finite number"):
+        calculate_prefill_tflop(params_b=float("nan"), prompt_tokens=8192)
+    with pytest.raises(ValueError, match="finite number"):
+        calculate_required_prefill_throughput(prefill_tflop=float("inf"), target_ttft_seconds=3.0)
+    with pytest.raises(ValueError, match="finite number"):
+        estimate_prefill(params_b=32.0, prompt_tokens=8192, target_ttft_seconds=float("nan"))
+

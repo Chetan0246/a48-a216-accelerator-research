@@ -1,4 +1,5 @@
 import pytest
+
 from accelerator_sim.capacity import (
     calculate_stored_weights_gb,
     calculate_usable_memory_gb,
@@ -155,3 +156,62 @@ def test_malformed_workload_config_rejection():
             num_experts=8,
             experts_per_token=16,
         )
+
+    # Reject inconsistent parameter split (shared + routed != total)
+    with pytest.raises(ValueError, match="Inconsistent parameter accounting"):
+        WorkloadConfig(
+            key="inconsistent_moe",
+            name="Inconsistent MoE",
+            total_parameters_b=46.7,
+            active_parameters_b=12.9,
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=8,
+            head_dim=128,
+            is_moe=True,
+            num_experts=8,
+            experts_per_token=2,
+            shared_params_b=5.0,
+            routed_expert_params_b=30.0,  # 5 + 30 = 35 != 46.7
+        )
+
+    # Accept consistent parameter split
+    valid_moe = WorkloadConfig(
+        key="consistent_moe",
+        name="Consistent MoE",
+        total_parameters_b=46.7,
+        active_parameters_b=12.9,
+        num_layers=32,
+        hidden_size=4096,
+        num_attention_heads=32,
+        num_kv_heads=8,
+        head_dim=128,
+        is_moe=True,
+        num_experts=8,
+        experts_per_token=2,
+        shared_params_b=1.5,
+        routed_expert_params_b=45.2,
+    )
+    assert valid_moe.shared_params_b == 1.5
+    assert valid_moe.routed_expert_params_b == 45.2
+
+
+def test_capacity_non_finite_inputs():
+    with pytest.raises(ValueError, match="finite number"):
+        calculate_stored_weights_gb(float("nan"))
+    with pytest.raises(ValueError, match="finite number"):
+        calculate_stored_weights_gb(32.0, bits_per_param=float("inf"))
+    with pytest.raises(ValueError, match="finite number"):
+        calculate_usable_memory_gb(float("nan"), 4.0)
+    with pytest.raises(ValueError, match="finite number"):
+        evaluate_capacity(48.0, float("nan"), 1.0)
+    with pytest.raises(ValueError, match="finite number"):
+        SystemConfig(
+            key="nan_sys",
+            name="NaN System",
+            memory_capacity_gb=float("nan"),
+            peak_bandwidth_tb_s=1.792,
+            memory_bandwidth_gbs=1792.0,
+        )
+

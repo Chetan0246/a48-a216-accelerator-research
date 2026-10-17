@@ -2,61 +2,40 @@
 
 import argparse
 import json
-import math
 import os
 import sys
-from typing import Dict, Any, Optional
+from typing import Any
 
 try:
-    from .capacity import (
-        calculate_stored_weights_gb,
-        calculate_usable_memory_gb,
-        evaluate_capacity,
-    )
+    from .capacity import evaluate_capacity
+    from .decode import calculate_decode_bandwidth_ceiling
     from .kv_cache import (
         KVCacheShape,
-        calculate_kv_bytes_per_token,
         calculate_kv_cache_per_sequence_gb,
-        calculate_kv_cache_total_gb,
     )
+    from .moe import evaluate_moe_decode
     from .prefill import (
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
-        estimate_prefill,
-    )
-    from .decode import calculate_decode_bandwidth_ceiling
-    from .moe import (
-        calculate_expected_expert_union,
-        evaluate_moe_decode,
     )
 except (ImportError, ValueError):
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if pkg_dir not in sys.path:
         sys.path.insert(0, pkg_dir)
-    from accelerator_sim.capacity import (
-        calculate_stored_weights_gb,
-        calculate_usable_memory_gb,
-        evaluate_capacity,
-    )
+    from accelerator_sim.capacity import evaluate_capacity
+    from accelerator_sim.decode import calculate_decode_bandwidth_ceiling
     from accelerator_sim.kv_cache import (
         KVCacheShape,
-        calculate_kv_bytes_per_token,
         calculate_kv_cache_per_sequence_gb,
-        calculate_kv_cache_total_gb,
     )
+    from accelerator_sim.moe import evaluate_moe_decode
     from accelerator_sim.prefill import (
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
-        estimate_prefill,
-    )
-    from accelerator_sim.decode import calculate_decode_bandwidth_ceiling
-    from accelerator_sim.moe import (
-        calculate_expected_expert_union,
-        evaluate_moe_decode,
     )
 
 
-def load_json_file(file_path: str) -> Dict[str, Any]:
+def load_json_file(file_path: str) -> dict[str, Any]:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Config file not found: {file_path}")
     with open(file_path, "r", encoding="utf-8") as f:
@@ -133,18 +112,28 @@ def main(argv=None):
     experts = args.experts
     top_k = args.top_k
 
+    attention_type = "gqa"
+
     if args.workload:
         if args.workload not in workloads_data:
             raise ValueError(f"Workload '{args.workload}' not found. Available: {list(workloads_data.keys())}")
         wl = workloads_data[args.workload]
+        if not wl.get("is_complete", True) or wl.get("attention_type") in ("mla", "latent"):
+            raise ValueError(
+                f"Workload '{args.workload}' is marked incomplete ({wl.get('status', 'incomplete')}) "
+                f"with attention_type='{wl.get('attention_type')}'. Evaluation is deferred until dedicated "
+                "architecture modeling is implemented."
+            )
         params_b = wl.get("total_parameters_b", params_b)
         model_type = "moe" if wl.get("is_moe", False) else "dense"
         layers = wl.get("num_layers", layers)
         kv_heads = wl.get("num_kv_heads", kv_heads)
         head_dim = wl.get("head_dim", head_dim)
         bits_per_param = wl.get("bits_per_param", bits_per_param)
+        shared_params_b = wl.get("shared_params_b", shared_params_b)
         experts = wl.get("num_experts", experts)
         top_k = wl.get("experts_per_token", top_k)
+        attention_type = wl.get("attention_type", "gqa")
 
     # Hardware specs
     physical_mem_gb = float(sys_cfg["memory_capacity_gb"])
@@ -160,6 +149,7 @@ def main(argv=None):
         head_dim=head_dim,
         precision_bits=args.kv_bits,
         overhead_percent=args.kv_overhead_percent,
+        attention_type=attention_type,
     )
     kv_per_seq_gb = calculate_kv_cache_per_sequence_gb(kv_shape, args.context)
     kv_total_gb = kv_per_seq_gb * args.batch

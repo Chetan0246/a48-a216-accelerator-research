@@ -1,12 +1,17 @@
 import os
+
 import pytest
-from accelerator_sim.calibration import BenchmarkManifest, BenchmarkRecord, CalibrationModel
+
+from accelerator_sim.calibration import (
+    BenchmarkManifest,
+    CalibrationModel,
+)
+from accelerator_sim.capacity import calculate_stored_weights_gb
 from accelerator_sim.decode import calculate_decode_bandwidth_ceiling
 from accelerator_sim.kv_cache import KVCacheShape, calculate_kv_cache_per_sequence_gb
-from accelerator_sim.capacity import calculate_stored_weights_gb
 
 
-def test_load_benchmark_manifest_provisional_labeling():
+def test_load_benchmark_manifest_unverified_labeling():
     manifest_path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
         "benchmarks",
@@ -20,14 +25,46 @@ def test_load_benchmark_manifest_provisional_labeling():
     assert "H100" in first.hardware_name
     assert first.measured_tpot_ms == 9.8
     assert first.source != ""
-    # Verify provenance labeling
-    assert first.verification_status == "provisional"
+    assert first.source_url.startswith("https://")
+    assert "HBM3" in first.hardware_details
+    assert "tensor_parallel_size" in first.execution_settings
+    # Verify provenance labeling is unverified
+    assert first.verification_status == "unverified"
     assert not first.is_verified
 
-    provisional = manifest.get_provisional_records()
-    assert len(provisional) == len(manifest.records)
+    unverified = manifest.get_unverified_records()
+    assert len(unverified) == len(manifest.records)
     verified = manifest.get_verified_records()
     assert len(verified) == 0
+
+
+def test_empty_calibration_dataset_raises_value_error():
+    calib = CalibrationModel()
+    with pytest.raises(ValueError, match="Empty dataset cannot yield 0% error"):
+        calib.compute_mape()
+
+    # Adding a record for 'tpot' still raises if filtering for 'ttft'
+    calib.add_comparison(
+        benchmark_id="bm_001",
+        metric="tpot",
+        measured=10.0,
+        simulated=12.0,
+        verification_status="verified",
+    )
+    with pytest.raises(ValueError, match="metric='ttft'"):
+        calib.compute_mape(metric="ttft")
+
+    # If only unverified records exist, verified_only filter raises ValueError
+    calib_unver = CalibrationModel()
+    calib_unver.add_comparison(
+        benchmark_id="bm_unver",
+        metric="tpot",
+        measured=10.0,
+        simulated=12.0,
+        verification_status="unverified",
+    )
+    with pytest.raises(ValueError, match="verified only"):
+        calib_unver.compute_mape(metric="tpot", verified_only=True)
 
 
 def test_controlled_gpu_baseline_calibration():
@@ -74,17 +111,17 @@ def test_controlled_gpu_baseline_calibration():
     assert pytest.approx(calibrated_tpot_ms, rel=1e-3) == measured_tpot_b1
 
 
-def test_calibration_model_provisional_warning_and_mape():
+def test_calibration_model_unverified_warning_and_mape():
     calib = CalibrationModel()
 
-    # Adding provisional record issues a UserWarning
-    with pytest.warns(UserWarning, match="provisional benchmark"):
+    # Adding unverified record issues a UserWarning
+    with pytest.warns(UserWarning, match="unverified benchmark"):
         calib.add_comparison(
-            benchmark_id="bm_prov",
+            benchmark_id="bm_unver",
             metric="tpot",
             measured=10.0,
             simulated=11.0,
-            verification_status="provisional",
+            verification_status="unverified",
         )
 
     # Adding verified record does not issue a warning
@@ -101,3 +138,10 @@ def test_calibration_model_provisional_warning_and_mape():
 
     # Verified-only MAPE: only bm_ver (10%)
     assert pytest.approx(calib.compute_mape(metric="tpot", verified_only=True), rel=1e-4) == 10.0
+
+    # Non-finite inputs are rejected
+    with pytest.raises(ValueError, match="must be a finite number"):
+        calib.add_comparison("bad", "tpot", float("nan"), 10.0)
+    with pytest.raises(ValueError, match="must be a finite number"):
+        calib.add_comparison("bad", "tpot", 10.0, float("inf"))
+

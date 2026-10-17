@@ -1,4 +1,5 @@
 import pytest
+
 from accelerator_sim.decode import calculate_decode_bandwidth_ceiling
 
 
@@ -76,3 +77,20 @@ def test_decode_invalid_inputs():
             kv_cache_per_sequence_gb=1.6,
             batch_size=1,
         )
+    with pytest.raises(ValueError, match="finite number"):
+        calculate_decode_bandwidth_ceiling(
+            peak_bandwidth_tb_s=float("nan"),
+            effective_bandwidth_fraction=0.8,
+            weight_traffic_gb=18.0,
+            kv_cache_per_sequence_gb=1.6,
+            batch_size=1,
+        )
+    with pytest.raises(ValueError, match="finite number"):
+        calculate_decode_bandwidth_ceiling(
+            peak_bandwidth_tb_s=1.792,
+            effective_bandwidth_fraction=float("inf"),
+            weight_traffic_gb=18.0,
+            kv_cache_per_sequence_gb=1.6,
+            batch_size=1,
+        )
+
