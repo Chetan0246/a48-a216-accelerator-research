@@ -79,12 +79,18 @@
     "default_context_len": 8192,
     "default_gen_len": 256,
     "bits_per_param": 4.5,
-    "attention_type": "gqa",
+    "attention_type": "hybrid_gated_deltanet",
     "shared_params_b": 2.8,
     "routed_expert_params_b": 32.2,
-    "is_complete": true,
-    "status": "supported",
-    "notes": "Qwen 3.6 35B A3B sparse MoE architecture. 40 layers, 256 routed experts (8 active per token), intermediate_size 512. Routed parameters: 40 * 256 * 3 * 2048 * 512 = 32.21B (~32.2B). Shared parameters: ~2.79B (~2.8B). Total: 35.0B. Active parameters per token: 2.8B shared + 8 * (32.2B / 256) = 3.81B (~3.8B, hence A3B designation)."
+    "is_complete": false,
+    "status": "incomplete_hybrid_cache_deferred",
+    "hybrid_attention": {
+      "linear_attention_layers": 30,
+      "gated_attention_layers": 10,
+      "block_pattern": "10 x [3 x (Gated DeltaNet linear attention -> MoE) -> 1 x (Gated Attention -> MoE)]",
+      "linear_mechanism": "gated_deltanet_recurrent_state"
+    },
+    "notes": "Qwen 3.6 35B A3B sparse MoE with hybrid attention. 40 layers total: 30 layers Gated DeltaNet (linear attention with fixed-size recurrent state) and 10 layers standard Gated Attention with KV heads. Parameter storage (19.688 GB weights at 4.5 bits) is supported; cache capacity and decode bandwidth projections are deferred until dual recurrent-state and KV-cache modeling is implemented."
   },
   "deepseek-v2-lite": {
     "name": "DeepSeek-V2-Lite",

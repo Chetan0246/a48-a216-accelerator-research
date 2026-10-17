@@ -80,6 +80,7 @@ class WorkloadConfig:
     routed_expert_params_b: float | None = None
     is_complete: bool = True
     status: str = "supported"
+    hybrid_attention: dict[str, Any] | None = None
     notes: str = ""
 
     def __post_init__(self) -> None:

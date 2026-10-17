@@ -29,7 +29,7 @@ def calculate_expected_expert_union(
     expert_count: int,
     top_k: int,
     batch_size: int,
-    expert_probs: list[float] | None = None,
+    expert_inclusion_probs: list[float] | None = None,
 ) -> float:
     """Calculates expected distinct experts activated across a batch.
 
@@ -39,18 +39,21 @@ def calculate_expected_expert_union(
       Across a batch of B independent tokens, probability of never being selected is (1 - top_k / expert_count)^B.
       Expected unique experts: expert_count * [1.0 - (1.0 - top_k / expert_count)^B].
 
-    - Under an explicit expert selection probability distribution (expert_probs = [p_1, ..., p_E]):
-      For expert i with marginal token selection probability p_i (where sum(p_i) == 1.0):
-      The single-token inclusion probability with top-k choices is min(1.0, top_k * p_i).
-      Across a batch of B independent tokens, probability of expert i never being selected is:
-          (1.0 - min(1.0, top_k * p_i))^B
-      Expected unique experts: sum_{i=1}^E [1.0 - (1.0 - min(1.0, top_k * p_i))^B].
+    - Under explicit marginal per-token expert inclusion probabilities (expert_inclusion_probs = [q_1, ..., q_E]):
+      Each entry q_i in [0.0, 1.0] represents the marginal probability that one token selects expert i.
+      Since each token selects top_k experts in total, the sum of inclusion probabilities must satisfy:
+          sum_{i=1}^E q_i == top_k
+      Assuming independence between tokens across a batch of B tokens, the probability that expert i is never
+      selected by any token in the batch is (1.0 - q_i)^B.
+      The expected number of distinct activated experts across the batch is:
+          E[U] = sum_{i=1}^E [1.0 - (1.0 - q_i)^B]
 
     Args:
         expert_count: Total number of routed experts (E).
         top_k: Number of experts activated per token (k).
         batch_size: Number of concurrent tokens/sequences in the batch (B).
-        expert_probs: Optional probability distribution over experts summing to 1.0.
+        expert_inclusion_probs: Optional list of marginal per-token inclusion probabilities q_i,
+            where each q_i in [0.0, 1.0] and sum(q_i) == top_k.
 
     Returns:
         Expected number of distinct active experts.
@@ -66,32 +69,31 @@ def calculate_expected_expert_union(
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
 
-    if expert_probs is None:
+    if expert_inclusion_probs is None:
         prob_not_selected_single = 1.0 - (top_k / float(expert_count))
         prob_not_selected_batch = prob_not_selected_single ** batch_size
         return float(expert_count * (1.0 - prob_not_selected_batch))
 
-    # Explicit distribution validation
-    if len(expert_probs) != expert_count:
+    # Explicit marginal inclusion probabilities validation
+    if len(expert_inclusion_probs) != expert_count:
         raise ValueError(
-            f"expert_probs length ({len(expert_probs)}) must match expert_count ({expert_count})"
+            f"expert_inclusion_probs length ({len(expert_inclusion_probs)}) must match expert_count ({expert_count})"
         )
-    for idx, p in enumerate(expert_probs):
-        if not math.isfinite(p):
-            raise ValueError(f"expert_probs[{idx}] must be a finite number, got {p}")
-        if p < 0.0:
-            raise ValueError(f"expert_probs[{idx}] cannot be negative, got {p}")
+    for idx, q in enumerate(expert_inclusion_probs):
+        if not math.isfinite(q):
+            raise ValueError(f"expert_inclusion_probs[{idx}] must be a finite number, got {q}")
+        if not (0.0 <= q <= 1.0):
+            raise ValueError(
+                f"expert_inclusion_probs[{idx}] must be between 0 and 1, got {q}"
+            )
 
-    total_p = sum(expert_probs)
-    if abs(total_p - 1.0) > 1e-4:
-        raise ValueError(f"expert_probs must sum to 1.0, got {total_p:.6f}")
+    sum_q = sum(expert_inclusion_probs)
+    if abs(sum_q - float(top_k)) > 1e-4:
+        raise ValueError(
+            f"expert_inclusion_probs must sum to top_k ({top_k}), got {sum_q:.6f}"
+        )
 
-    expected_union = 0.0
-    for p in expert_probs:
-        single_inclusion = min(1.0, float(top_k) * p)
-        prob_not_selected_batch = (1.0 - single_inclusion) ** batch_size
-        expected_union += 1.0 - prob_not_selected_batch
-
+    expected_union = sum(1.0 - (1.0 - q) ** batch_size for q in expert_inclusion_probs)
     return float(expected_union)
 
 
@@ -137,7 +139,7 @@ def evaluate_moe_decode(
     card_sustained_bw_tb_s: float,
     host_bw_tb_s: float = 0.0,
     host_latency_ms: float = 0.0,
-    expert_probs: list[float] | None = None,
+    expert_inclusion_probs: list[float] | None = None,
     offload_mode: str = "serialized",
 ) -> MoEOffloadResult:
     """Evaluates MoE decode throughput ceiling with on-card and host offloading.
@@ -162,7 +164,7 @@ def evaluate_moe_decode(
         card_sustained_bw_tb_s: Accelerator sustained memory bandwidth in TB/s.
         host_bw_tb_s: Effective host offload bandwidth in TB/s (0 disables host throughput model).
         host_latency_ms: Fixed per-decode-step host offload dispatch latency in ms.
-        expert_probs: Optional selection probability distribution across experts.
+        expert_inclusion_probs: Optional marginal inclusion probability distribution across experts (summing to top_k).
         offload_mode: 'serialized' (conservative) or 'overlapped' (optimistic ceiling).
 
     Returns:
@@ -202,18 +204,33 @@ def evaluate_moe_decode(
 
     routed_total_b = total_params_b - shared_params_b
     expert_b = routed_total_b / float(total_experts)
+    nonresident_experts = total_experts - resident_experts
 
     # Calculate expected expert unions
-    expected_total_union = calculate_expected_expert_union(
-        expert_count=total_experts,
-        top_k=top_k,
-        batch_size=batch_size,
-        expert_probs=expert_probs,
-    )
-    inclusion_ratio = expected_total_union / float(total_experts)
-    expected_resident_union = float(resident_experts) * inclusion_ratio
-    nonresident_experts = total_experts - resident_experts
-    expected_nonresident_union = float(nonresident_experts) * inclusion_ratio
+    if expert_inclusion_probs is None:
+        expected_total_union = calculate_expected_expert_union(
+            expert_count=total_experts,
+            top_k=top_k,
+            batch_size=batch_size,
+        )
+        inclusion_ratio = expected_total_union / float(total_experts)
+        expected_resident_union = float(resident_experts) * inclusion_ratio
+        expected_nonresident_union = float(nonresident_experts) * inclusion_ratio
+    else:
+        # Validate and compute using exact per-expert inclusion probabilities
+        calculate_expected_expert_union(
+            expert_count=total_experts,
+            top_k=top_k,
+            batch_size=batch_size,
+            expert_inclusion_probs=expert_inclusion_probs,
+        )
+        expected_resident_union = float(
+            sum(1.0 - (1.0 - q) ** batch_size for q in expert_inclusion_probs[:resident_experts])
+        )
+        expected_nonresident_union = float(
+            sum(1.0 - (1.0 - q) ** batch_size for q in expert_inclusion_probs[resident_experts:])
+        )
+        expected_total_union = expected_resident_union + expected_nonresident_union
 
     # On-card memory traffic & step time
     card_active_params_b = shared_params_b + expected_resident_union * expert_b

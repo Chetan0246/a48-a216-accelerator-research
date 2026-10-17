@@ -25,9 +25,17 @@ This document formalizes the mathematical equations, hardware simplifications, a
 - **Overhead Baseline vs Paging Overhead**:
   - Pure analytical baseline: $\text{overhead\_percent} = 0.0\%$ default.
   - PagedAttention allocation: Configurable $\text{overhead\_percent} \approx 5.0\%$ to model block allocation table overhead and internal fragmentation.
-- **Attention Type Constraints**:
+- **Attention Type Constraints & Hybrid Architectures**:
   - The standard formula is mathematically valid for MHA, GQA, and MQA.
-  - Multi-Head Latent Attention (MLA, e.g., DeepSeek-V2/V3) compresses key-value representations into low-rank latent vectors and decouples RoPE keys. Applying standard GQA/MHA formulas to MLA workloads is invalid and strictly deferred via `UnsupportedAttentionTypeError`.
+  - **Multi-Head Latent Attention (MLA)**:
+    MLA (e.g., DeepSeek-V2/V3) compresses key-value representations into low-rank latent vectors and decouples RoPE keys. Applying standard GQA/MHA formulas to MLA workloads is invalid and strictly deferred via `UnsupportedAttentionTypeError`.
+  - **Hybrid Linear Attention & Gated Attention (Qwen3.6-35B-A3B)**:
+    Qwen3.6-35B-A3B employs a repeating hybrid pattern: $10 \times \big[3 \times (\text{Gated DeltaNet linear attention}) + 1 \times (\text{Gated Attention})\big]$ across its 40 layers.
+    - 30 layers utilize **Gated DeltaNet** linear attention with a fixed-size recurrent state $O(1)$ independent of context length $S$.
+    - 10 layers utilize standard **Gated Attention** with KV heads whose cache grows linearly $O(S)$ with context length $S$.
+    - Applying a 40-layer standard GQA formula to Qwen is physically incorrect (it overstates context-dependent KV cache size and memory traffic by $4\times$ on the linear layers).
+    - Cache capacity and decode bandwidth projections are strictly deferred via `UnsupportedAttentionTypeError` until dual recurrent-state and standard KV-cache modeling is implemented.
+    - Parameter-storage calculations ($19.688\text{ GB}$ weights at 4.5 bits) do not depend on attention cache architecture and remain fully supported.
 
 ---
 
@@ -73,12 +81,21 @@ This document formalizes the mathematical equations, hardware simplifications, a
 - **Expected Unique Experts**:
   - Under uniform independent routing of top-$k$ choices out of $E$ experts across batch $B$:
     $$\mathbb{E}[U] = E \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
-  - Under an arbitrary expert probability distribution $\mathbf{p} = [p_1, \dots, p_E]$ ($\sum p_i = 1$):
-    $$\mathbb{E}[U] = \sum_{i=1}^E \left[1 - \left(1 - \min(1.0, k \cdot p_i)\right)^B\right]$$
-  - **Routing Skew Semantics**: Routing skew concentrates token assignments onto a smaller subset of popular experts. This mathematically **decreases** or maintains the expected number of distinct active experts ($\mathbb{E}[U_{\text{skewed}}] \le \mathbb{E}[U_{\text{uniform}}]$), reducing total unique expert weight traffic while creating compute load imbalance across workers.
+  - Under explicit marginal per-token expert inclusion probabilities $\mathbf{q} = [q_1, \dots, q_E]$, where $q_i \in [0.0, 1.0]$ represents the marginal probability that one token selects expert $i$, subject to $\sum_{i=1}^E q_i = k$:
+    $$\mathbb{E}[U] = \sum_{i=1}^E \left[1 - (1 - q_i)^B\right]$$
+  - **Routing Skew Semantics & Jensen's Inequality**:
+    The function $f(q) = 1 - (1 - q)^B$ is strictly concave for $B > 1$ ($f''(q) = -B(B-1)(1-q)^{B-2} < 0$ on $q \in (0, 1)$). By Jensen's inequality:
+    $$\frac{1}{E}\sum_{i=1}^E \left[1 - (1 - q_i)^B\right] \le 1 - \left(1 - \frac{\sum q_i}{E}\right)^B = 1 - \left(1 - \frac{k}{E}\right)^B$$
+    $$\implies \mathbb{E}[U_{\text{skewed}}] \le \mathbb{E}[U_{\text{uniform}}]$$
+    Token concentration onto popular experts mathematically **decreases** or maintains the expected number of distinct activated experts across the batch, reducing total distinct expert weight traffic while concentrating compute load on popular bottleneck experts.
 - **Resident vs. Non-Resident Partitioning**:
-  $$\mathbb{E}[U_{\text{res}}] = E_{\text{res}} \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
-  $$\mathbb{E}[U_{\text{nonres}}] = (E - E_{\text{res}}) \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
+  - Uniform routing:
+    $$\mathbb{E}[U_{\text{res}}] = E_{\text{res}} \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
+    $$\mathbb{E}[U_{\text{nonres}}] = (E - E_{\text{res}}) \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
+  - Nonuniform routing with $\mathbf{q}$:
+    $$\mathbb{E}[U_{\text{res}}] = \sum_{i \in \text{resident}} \left[1 - (1 - q_i)^B\right]$$
+    $$\mathbb{E}[U_{\text{nonres}}] = \sum_{i \in \text{nonresident}} \left[1 - (1 - q_i)^B\right]$$
+    where $\mathbb{E}[U_{\text{res}}] + \mathbb{E}[U_{\text{nonres}}] = \mathbb{E}[U_{\text{total}}]$.
 - **Host-Offload Execution Bounds**:
   - **Serialized Bound** (conservative / non-overlapped): The stage execution times add sequentially per decoding step:
     $$t_{\text{step}} = t_{\text{card}} + t_{\text{host}}$$

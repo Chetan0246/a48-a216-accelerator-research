@@ -54,6 +54,13 @@ def calculate_kv_bytes_per_token(shape: KVCacheShape) -> float:
             "by the standard full K/V-cache formula. MLA uses compressed latent KV vectors and decoupled "
             "RoPE keys. Evaluation is deferred to avoid misleading capacity and bandwidth estimates."
         )
+    if "hybrid" in att or att in ("linear_attention", "gated_deltanet"):
+        raise UnsupportedAttentionTypeError(
+            f"Attention type '{shape.attention_type}' (Hybrid Linear/Gated Attention) is not supported "
+            "by the standard full K/V-cache formula. Qwen3.6-35B-A3B combines 30 Gated DeltaNet linear attention "
+            "layers (fixed recurrent state) with 10 standard gated attention layers. Cache capacity and "
+            "decode bandwidth projections are deferred until dual recurrent-state and KV-cache modeling is implemented."
+        )
     if att not in ("mha", "gqa", "mqa"):
         raise UnsupportedAttentionTypeError(
             f"Unsupported attention type '{shape.attention_type}'. "

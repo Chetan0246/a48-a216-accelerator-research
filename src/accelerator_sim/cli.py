@@ -5,7 +5,11 @@ import os
 import sys
 
 try:
-    from .capacity import evaluate_capacity
+    from .capacity import (
+        calculate_stored_weights_gb,
+        calculate_usable_memory_gb,
+        evaluate_capacity,
+    )
     from .decode import calculate_decode_bandwidth_ceiling
     from .kv_cache import (
         KVCacheShape,
@@ -16,7 +20,7 @@ try:
         load_systems_config,
         load_workloads_config,
     )
-    from .moe import evaluate_moe_decode
+    from .moe import calculate_expected_expert_union, evaluate_moe_decode
     from .prefill import (
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
@@ -25,7 +29,11 @@ except (ImportError, ValueError):
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if pkg_dir not in sys.path:
         sys.path.insert(0, pkg_dir)
-    from accelerator_sim.capacity import evaluate_capacity
+    from accelerator_sim.capacity import (
+        calculate_stored_weights_gb,
+        calculate_usable_memory_gb,
+        evaluate_capacity,
+    )
     from accelerator_sim.decode import calculate_decode_bandwidth_ceiling
     from accelerator_sim.kv_cache import (
         KVCacheShape,
@@ -36,7 +44,7 @@ except (ImportError, ValueError):
         load_systems_config,
         load_workloads_config,
     )
-    from accelerator_sim.moe import evaluate_moe_decode
+    from accelerator_sim.moe import calculate_expected_expert_union, evaluate_moe_decode
     from accelerator_sim.prefill import (
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
@@ -126,7 +134,7 @@ def main(argv=None):
         if args.workload not in workloads_data:
             raise ValueError(f"Workload '{args.workload}' not found. Available: {list(workloads_data.keys())}")
         wl = workloads_data[args.workload]
-        if not wl.is_complete or wl.attention_type in ("mla", "latent"):
+        if wl.attention_type in ("mla", "latent") or wl.status == "incomplete_mla_deferred":
             raise ValueError(
                 f"Workload '{args.workload}' is marked incomplete ({wl.status}) "
                 f"with attention_type='{wl.attention_type}'. Evaluation is deferred until dedicated "
@@ -172,7 +180,52 @@ def main(argv=None):
     sustained_bw_tb_s = peak_bw_tb_s * eff_bw_frac
     runtime_reserve = args.runtime_reserve_gb
 
-    # KV Cache Sizing
+    # Check if workload has hybrid attention whose cache is deferred
+    is_hybrid = "hybrid" in attention_type.lower() or attention_type.lower() in ("linear_attention", "gated_deltanet")
+
+    if is_hybrid:
+        stored_weights_gb = calculate_stored_weights_gb(params_b, bits_per_param)
+        usable_mem_gb = calculate_usable_memory_gb(physical_mem_gb, runtime_reserve)
+        headroom_weights = usable_mem_gb - stored_weights_gb
+
+        print("=" * 70)
+        print(f" ACCELERATOR SIMULATOR: {sys_cfg.name}")
+        print(f" Topology: {sys_cfg.topology or 'N/A'}")
+        print(f" Memory: {physical_mem_gb:.1f} GB | Peak BW: {peak_bw_tb_s:.3f} TB/s | Sustained: {sustained_bw_tb_s:.3f} TB/s ({eff_bw_frac:.0%})")
+        print("=" * 70)
+
+        print(f"\n[1] MEMORY CAPACITY EVALUATION (MoE {params_b:.1f}B - Hybrid Attention)")
+        print(f"  - Stored Weights:       {stored_weights_gb:.3f} GB ({bits_per_param:.2f} bits/param)")
+        print("  - KV Cache per sequence:DEFERRED (Hybrid attention: 30 Gated DeltaNet + 10 Gated Attention layers)")
+        print("  - Total Batch KV:       DEFERRED")
+        print(f"  - Model Footprint:      DEFERRED (Weights-only: {stored_weights_gb:.3f} GB)")
+        print(f"  - Runtime Reserve:      {runtime_reserve:.2f} GB")
+        print(f"  - Physical Memory:      {physical_mem_gb:.1f} GB")
+        print(f"  - Usable Memory:        {usable_mem_gb:.3f} GB")
+        print(f"  - Usable Headroom:      DEFERRED (Weights headroom: {headroom_weights:.3f} GB)")
+        print(f"  - Capacity Status:      {'WEIGHTS FIT IN MEMORY (Full footprint deferred)' if headroom_weights >= 0 else 'DOES NOT FIT (Weights exceed memory)'}")
+
+        union_res = calculate_expected_expert_union(experts, top_k, args.batch)
+        print(f"\n[2] MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE {params_b:.1f}B)")
+        print(f"  - Routed Experts:       {experts} total, top-{top_k} active/token")
+        print(f"  - Resident Experts:     {experts} / {experts} on-chip")
+        print(f"  - Expected Batch Union: {union_res:.4f} unique experts")
+
+        print("\n[3] DECODE THROUGHPUT CEILING (MoE)")
+        print("  - Decode Ceilings:      DEFERRED (Cannot project throughput without modeled cache traffic)")
+
+        active_params = wl.active_parameters_b if (args.workload and wl is not None) else (shared_params_b + top_k * (routed_params_b / float(experts)))
+        prefill_tflop = calculate_prefill_tflop(active_params, args.prompt_tokens, args.batch)
+        req_tflops = calculate_required_prefill_throughput(prefill_tflop, args.ttft_seconds)
+        print(f"\n[4] PREFILL COMPUTE ESTIMATE (Prompt: {args.prompt_tokens:,} tokens/seq, Batch: {args.batch})")
+        print(f"  - Dense-equivalent Work:{prefill_tflop:.3f} TFLOP (2 * P_active * S * B)")
+        print(f"  - Target TTFT Budget:   {args.ttft_seconds:.2f} s")
+        print(f"  - Required Throughput:  {req_tflops:.1f} effective TFLOP/s")
+
+        print("\n" + "=" * 70)
+        return
+
+    # Standard KV Cache Sizing for supported attention types
     kv_shape = KVCacheShape(
         num_layers=layers,
         num_kv_heads=kv_heads,

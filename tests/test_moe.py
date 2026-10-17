@@ -59,26 +59,66 @@ def test_moe_expert_distribution_skew_semantics():
     k = 2
     b = 8
 
-    # 1. Uniform explicit distribution matches analytical closed form
-    uniform_probs = [1.0 / float(e)] * e
+    # 1. Uniform explicit marginal inclusion vector matches analytical closed form
+    # Under uniform routing, each expert has marginal inclusion probability q_i = k / E
+    uniform_inclusion = [float(k) / float(e)] * e
+    assert pytest.approx(sum(uniform_inclusion), rel=1e-6) == float(k)
     u_analytical = calculate_expected_expert_union(e, k, batch_size=b)
-    u_uniform_dist = calculate_expected_expert_union(e, k, batch_size=b, expert_probs=uniform_probs)
+    u_uniform_dist = calculate_expected_expert_union(e, k, batch_size=b, expert_inclusion_probs=uniform_inclusion)
     assert pytest.approx(u_uniform_dist, rel=1e-5) == u_analytical
 
-    # 2. Skewed distribution: tokens concentrate on top 4 experts (60% of selections)
-    # Correct skew semantics: concentration reduces total unique experts read
-    skewed_probs = [0.15] * 4 + [(1.0 - 0.60) / 60.0] * 60
-    assert pytest.approx(sum(skewed_probs), rel=1e-6) == 1.0
-    u_skewed = calculate_expected_expert_union(e, k, batch_size=b, expert_probs=skewed_probs)
+    # 2. Skewed inclusion probabilities:
+    # Top 4 experts have q_i = 0.25 (tokens frequently activate them; sum for top-4 = 1.0)
+    # Remaining 60 experts share the remaining 1.0 inclusion probability (q_i = 1.0 / 60)
+    # Total sum = 4 * 0.25 + 60 * (1/60) = 2.0 = top_k
+    skewed_inclusion = [0.25] * 4 + [1.0 / 60.0] * 60
+    assert pytest.approx(sum(skewed_inclusion), rel=1e-6) == float(k)
+    u_skewed = calculate_expected_expert_union(e, k, batch_size=b, expert_inclusion_probs=skewed_inclusion)
+
+    # Correct skew semantics: Token concentration on popular experts mathematically reduces
+    # the expected number of distinct activated experts across the batch (Jensen's inequality on concave 1 - (1-q)^B).
     assert u_skewed < u_analytical
 
-    # 3. Validation rejections for malformed distributions
+    # Also verify evaluate_moe_decode with expert_inclusion_probs
+    res_uniform = evaluate_moe_decode(
+        total_experts=e,
+        resident_experts=e,
+        top_k=k,
+        shared_params_b=8.0,
+        total_params_b=40.0,
+        bits_per_param=4.5,
+        batch_size=b,
+        kv_cache_per_sequence_gb=1.6,
+        card_sustained_bw_tb_s=1.4336,
+        expert_inclusion_probs=uniform_inclusion,
+    )
+    res_skewed = evaluate_moe_decode(
+        total_experts=e,
+        resident_experts=e,
+        top_k=k,
+        shared_params_b=8.0,
+        total_params_b=40.0,
+        bits_per_param=4.5,
+        batch_size=b,
+        kv_cache_per_sequence_gb=1.6,
+        card_sustained_bw_tb_s=1.4336,
+        expert_inclusion_probs=skewed_inclusion,
+    )
+    assert pytest.approx(res_uniform.expected_total_union, rel=1e-5) == u_analytical
+    assert res_skewed.expected_total_union < res_uniform.expected_total_union
+    assert res_skewed.card_weight_traffic_gb < res_uniform.card_weight_traffic_gb
+
+    # 3. Validation rejections for malformed inclusion vectors
     with pytest.raises(ValueError, match="length"):
-        calculate_expected_expert_union(e, k, b, expert_probs=[0.5, 0.5])
-    with pytest.raises(ValueError, match="negative"):
-        calculate_expected_expert_union(e, k, b, expert_probs=[-0.1] + [1.1 / 63] * 63)
-    with pytest.raises(ValueError, match="must sum to 1.0"):
-        calculate_expected_expert_union(e, k, b, expert_probs=[0.01] * 64)
+        calculate_expected_expert_union(e, k, b, expert_inclusion_probs=[0.5, 0.5])
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        calculate_expected_expert_union(e, k, b, expert_inclusion_probs=[-0.1] + [2.1 / 63] * 63)
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        calculate_expected_expert_union(e, k, b, expert_inclusion_probs=[1.5] + [0.5 / 63] * 63)
+    with pytest.raises(ValueError, match="must sum to top_k"):
+        calculate_expected_expert_union(e, k, b, expert_inclusion_probs=[0.01] * 64)
+    with pytest.raises(ValueError, match="finite number"):
+        calculate_expected_expert_union(e, k, b, expert_inclusion_probs=[float("nan")] * 64)
 
 
 def test_moe_host_offloading_serialized_and_overlapped_bounds():

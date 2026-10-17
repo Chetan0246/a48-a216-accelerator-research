@@ -77,3 +77,32 @@ def test_kv_cache_mla_and_unsupported_attention_rejection():
     with pytest.raises(UnsupportedAttentionTypeError, match="Unsupported attention type"):
         calculate_kv_bytes_per_token(weird_shape)
 
+
+def test_kv_cache_qwen_hybrid_attention_rejection():
+    """Qwen3.6-35B-A3B hybrid linear/gated attention cache must be deferred."""
+    from accelerator_sim.capacity import calculate_stored_weights_gb
+    from accelerator_sim.kv_cache import UnsupportedAttentionTypeError
+
+    # Qwen 3.6 35B A3B: 40 layers, 2 KV heads, 256 head dim
+    hybrid_shape = KVCacheShape(
+        num_layers=40,
+        num_kv_heads=2,
+        head_dim=256,
+        attention_type="hybrid_gated_deltanet",
+    )
+
+    # 1. Prohibit standard KV cache calculation for hybrid attention
+    with pytest.raises(UnsupportedAttentionTypeError, match="Hybrid Linear/Gated Attention"):
+        calculate_kv_bytes_per_token(hybrid_shape)
+
+    with pytest.raises(UnsupportedAttentionTypeError, match="Hybrid Linear/Gated Attention"):
+        calculate_kv_cache_per_sequence_gb(hybrid_shape, context_length=8192)
+
+    with pytest.raises(UnsupportedAttentionTypeError, match="Hybrid Linear/Gated Attention"):
+        calculate_kv_cache_total_gb(hybrid_shape, context_length=8192, batch_size=4)
+
+    # 2. Parameter storage calculations that do not depend on cache architecture remain fully supported
+    qwen_weights_gb = calculate_stored_weights_gb(params_b=35.0, bits_per_param=4.5)
+    assert pytest.approx(qwen_weights_gb, rel=1e-5) == 19.6875
+
+

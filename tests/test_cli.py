@@ -71,10 +71,12 @@ def test_cli_qwen_preset_run(capsys):
     ]
     main(test_args)
     captured = capsys.readouterr().out
+    assert "ACCELERATOR SIMULATOR: A48 Base" in captured
+    assert "19.688 GB" in captured
+    assert "DEFERRED" in captured
     assert "MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE 35.0B)" in captured
     assert "256 total, top-8 active/token" in captured
+    assert "30.5310" in captured
     assert "DECODE THROUGHPUT CEILING (MoE)" in captured
-    assert "Serialized Bound TPS" in captured
-    assert "Overlapped Bound TPS" in captured
 
 

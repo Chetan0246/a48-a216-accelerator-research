@@ -1,33 +1,41 @@
-system,workload,batch_size,expected_active_experts,card_weight_traffic_gb,aggregate_tps,serialized_aggregate_tps,overlapped_aggregate_tps,per_sequence_tps
-A48,dense-32b,1,1.0,18.0,73.1,73.1,73.1,73.1
-A48,dense-32b,4,1.0,18.0,234.61,234.61,234.61,58.65
-A48,dense-32b,8,1.0,18.0,371.34,371.34,371.34,46.42
-A48,dense-32b,16,1.0,18.0,524.05,524.05,524.05,32.75
-A48,llama-3-8b,1,1.0,4.517,299.58,299.58,299.58,299.58
-A48,llama-3-8b,4,1.0,4.517,1025.72,1025.72,1025.72,256.43
-A48,llama-3-8b,8,1.0,4.517,1720.92,1720.92,1720.92,215.11
-A48,llama-3-8b,16,1.0,4.517,2603.04,2603.04,2603.04,162.69
-A48,llama-3-70b,1,1.0,39.712,35.5,35.5,35.5,35.5
-A48,llama-3-70b,4,1.0,39.712,135.26,135.26,135.26,33.81
-A48,llama-3-70b,8,1.0,39.712,254.4,254.4,254.4,31.8
-A48,llama-3-70b,16,1.0,39.712,454.66,454.66,454.66,28.42
-A48,qwen-3.6-35b-a3b,1,8.0,2.141,509.8,509.8,509.8,509.8
-A48,qwen-3.6-35b-a3b,4,30.531,3.735,893.28,893.28,893.28,223.32
-A48,qwen-3.6-35b-a3b,8,57.4208,5.638,1042.02,1042.02,1042.02,130.25
-A48,qwen-3.6-35b-a3b,16,101.9622,8.789,1174.69,1174.69,1174.69,73.42
-A216,dense-32b,1,1.0,18.0,685.34,685.34,685.34,685.34
-A216,dense-32b,4,1.0,18.0,2199.45,2199.45,2199.45,549.86
-A216,dense-32b,8,1.0,18.0,3481.31,3481.31,3481.31,435.16
-A216,dense-32b,16,1.0,18.0,4912.98,4912.98,4912.98,307.06
-A216,llama-3-8b,1,1.0,4.517,2808.6,2808.6,2808.6,2808.6
-A216,llama-3-8b,4,1.0,4.517,9616.11,9616.11,9616.11,2404.03
-A216,llama-3-8b,8,1.0,4.517,16133.59,16133.59,16133.59,2016.7
-A216,llama-3-8b,16,1.0,4.517,24403.52,24403.52,24403.52,1525.22
-A216,llama-3-70b,1,1.0,39.712,332.81,332.81,332.81,332.81
-A216,llama-3-70b,4,1.0,39.712,1268.02,1268.02,1268.02,317.0
-A216,llama-3-70b,8,1.0,39.712,2385.03,2385.03,2385.03,298.13
-A216,llama-3-70b,16,1.0,39.712,4262.44,4262.44,4262.44,266.4
-A216,qwen-3.6-35b-a3b,1,8.0,2.141,4779.34,4779.34,4779.34,4779.34
-A216,qwen-3.6-35b-a3b,4,30.531,3.735,8374.51,8374.51,8374.51,2093.63
-A216,qwen-3.6-35b-a3b,8,57.4208,5.638,9768.91,9768.91,9768.91,1221.11
-A216,qwen-3.6-35b-a3b,16,101.9622,8.789,11012.76,11012.76,11012.76,688.3
+system,workload,batch_size,expected_active_experts,card_weight_traffic_gb,aggregate_tps,serialized_aggregate_tps,overlapped_aggregate_tps,per_sequence_tps,decode_status
+A48,dense-32b,1,1.0,18.0,73.1,73.1,73.1,73.1,supported
+A48,dense-32b,4,1.0,18.0,234.61,234.61,234.61,58.65,supported
+A48,dense-32b,8,1.0,18.0,371.34,371.34,371.34,46.42,supported
+A48,dense-32b,16,1.0,18.0,524.05,524.05,524.05,32.75,supported
+A48,llama-3-8b,1,1.0,4.517,299.58,299.58,299.58,299.58,supported
+A48,llama-3-8b,4,1.0,4.517,1025.72,1025.72,1025.72,256.43,supported
+A48,llama-3-8b,8,1.0,4.517,1720.92,1720.92,1720.92,215.11,supported
+A48,llama-3-8b,16,1.0,4.517,2603.04,2603.04,2603.04,162.69,supported
+A48,llama-3-70b,1,1.0,39.712,35.5,35.5,35.5,35.5,supported
+A48,llama-3-70b,4,1.0,39.712,135.26,135.26,135.26,33.81,supported
+A48,llama-3-70b,8,1.0,39.712,254.4,254.4,254.4,31.8,supported
+A48,llama-3-70b,16,1.0,39.712,454.66,454.66,454.66,28.42,supported
+A48,qwen-3.6-35b-a3b,1,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_hybrid_cache_deferred)
+A48,qwen-3.6-35b-a3b,4,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_hybrid_cache_deferred)
+A48,qwen-3.6-35b-a3b,8,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_hybrid_cache_deferred)
+A48,qwen-3.6-35b-a3b,16,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_hybrid_cache_deferred)
+A48,deepseek-v2-lite,1,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_mla_deferred)
+A48,deepseek-v2-lite,4,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_mla_deferred)
+A48,deepseek-v2-lite,8,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_mla_deferred)
+A48,deepseek-v2-lite,16,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_mla_deferred)
+A216,dense-32b,1,1.0,18.0,685.34,685.34,685.34,685.34,supported
+A216,dense-32b,4,1.0,18.0,2199.45,2199.45,2199.45,549.86,supported
+A216,dense-32b,8,1.0,18.0,3481.31,3481.31,3481.31,435.16,supported
+A216,dense-32b,16,1.0,18.0,4912.98,4912.98,4912.98,307.06,supported
+A216,llama-3-8b,1,1.0,4.517,2808.6,2808.6,2808.6,2808.6,supported
+A216,llama-3-8b,4,1.0,4.517,9616.11,9616.11,9616.11,2404.03,supported
+A216,llama-3-8b,8,1.0,4.517,16133.59,16133.59,16133.59,2016.7,supported
+A216,llama-3-8b,16,1.0,4.517,24403.52,24403.52,24403.52,1525.22,supported
+A216,llama-3-70b,1,1.0,39.712,332.81,332.81,332.81,332.81,supported
+A216,llama-3-70b,4,1.0,39.712,1268.02,1268.02,1268.02,317.0,supported
+A216,llama-3-70b,8,1.0,39.712,2385.03,2385.03,2385.03,298.13,supported
+A216,llama-3-70b,16,1.0,39.712,4262.44,4262.44,4262.44,266.4,supported
+A216,qwen-3.6-35b-a3b,1,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_hybrid_cache_deferred)
+A216,qwen-3.6-35b-a3b,4,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_hybrid_cache_deferred)
+A216,qwen-3.6-35b-a3b,8,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_hybrid_cache_deferred)
+A216,qwen-3.6-35b-a3b,16,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_hybrid_cache_deferred)
+A216,deepseek-v2-lite,1,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_mla_deferred)
+A216,deepseek-v2-lite,4,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_mla_deferred)
+A216,deepseek-v2-lite,8,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_mla_deferred)
+A216,deepseek-v2-lite,16,deferred,deferred,deferred,deferred,deferred,deferred,deferred (incomplete_mla_deferred)
