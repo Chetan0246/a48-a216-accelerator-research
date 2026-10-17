@@ -62,3 +62,19 @@ def test_cli_incomplete_workload_rejection():
     with pytest.raises(ValueError, match="incomplete.*mla"):
         main(test_args)
 
+
+def test_cli_qwen_preset_run(capsys):
+    test_args = [
+        "--system", "A48",
+        "--workload", "qwen-3.6-35b-a3b",
+        "--batch", "4",
+    ]
+    main(test_args)
+    captured = capsys.readouterr().out
+    assert "MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE 35.0B)" in captured
+    assert "256 total, top-8 active/token" in captured
+    assert "DECODE THROUGHPUT CEILING (MoE)" in captured
+    assert "Serialized Bound TPS" in captured
+    assert "Overlapped Bound TPS" in captured
+
+

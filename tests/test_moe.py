@@ -54,39 +54,34 @@ def test_moe_all_resident_decode():
     assert res.is_validated_predictor is False
 
 
-def test_moe_routing_skew_sensitivity():
-    # Uniform routing
-    res_uniform = evaluate_moe_decode(
-        total_experts=64,
-        resident_experts=64,
-        top_k=2,
-        shared_params_b=8.0,
-        total_params_b=40.0,
-        bits_per_param=4.5,
-        batch_size=8,
-        kv_cache_per_sequence_gb=1.610612736,
-        card_sustained_bw_tb_s=1.4336,
-        routing_skew_factor=1.0,
-    )
+def test_moe_expert_distribution_skew_semantics():
+    e = 64
+    k = 2
+    b = 8
 
-    # Skewed routing (e.g. 1.25x load concentration on active experts)
-    res_skewed = evaluate_moe_decode(
-        total_experts=64,
-        resident_experts=64,
-        top_k=2,
-        shared_params_b=8.0,
-        total_params_b=40.0,
-        bits_per_param=4.5,
-        batch_size=8,
-        kv_cache_per_sequence_gb=1.610612736,
-        card_sustained_bw_tb_s=1.4336,
-        routing_skew_factor=1.25,
-    )
-    assert res_skewed.card_weight_traffic_gb > res_uniform.card_weight_traffic_gb
-    assert res_skewed.card_aggregate_tps < res_uniform.card_aggregate_tps
+    # 1. Uniform explicit distribution matches analytical closed form
+    uniform_probs = [1.0 / float(e)] * e
+    u_analytical = calculate_expected_expert_union(e, k, batch_size=b)
+    u_uniform_dist = calculate_expected_expert_union(e, k, batch_size=b, expert_probs=uniform_probs)
+    assert pytest.approx(u_uniform_dist, rel=1e-5) == u_analytical
+
+    # 2. Skewed distribution: tokens concentrate on top 4 experts (60% of selections)
+    # Correct skew semantics: concentration reduces total unique experts read
+    skewed_probs = [0.15] * 4 + [(1.0 - 0.60) / 60.0] * 60
+    assert pytest.approx(sum(skewed_probs), rel=1e-6) == 1.0
+    u_skewed = calculate_expected_expert_union(e, k, batch_size=b, expert_probs=skewed_probs)
+    assert u_skewed < u_analytical
+
+    # 3. Validation rejections for malformed distributions
+    with pytest.raises(ValueError, match="length"):
+        calculate_expected_expert_union(e, k, b, expert_probs=[0.5, 0.5])
+    with pytest.raises(ValueError, match="negative"):
+        calculate_expected_expert_union(e, k, b, expert_probs=[-0.1] + [1.1 / 63] * 63)
+    with pytest.raises(ValueError, match="must sum to 1.0"):
+        calculate_expected_expert_union(e, k, b, expert_probs=[0.01] * 64)
 
 
-def test_moe_host_offloading_and_limits():
+def test_moe_host_offloading_serialized_and_overlapped_bounds():
     # 32 resident, 32 non-resident
     # When host BW is 0, combined TPS is 0 and status is unspecified
     res_no_host = evaluate_moe_decode(
@@ -100,29 +95,63 @@ def test_moe_host_offloading_and_limits():
         kv_cache_per_sequence_gb=1.610612736,
         card_sustained_bw_tb_s=1.4336,
         host_bw_tb_s=0.0,
+        offload_mode="serialized",
     )
     assert res_no_host.expected_nonresident_union > 0.0
     assert res_no_host.host_weight_traffic_gb > 0.0
     assert res_no_host.combined_aggregate_tps == 0.0
     assert res_no_host.limiting_factor == "host offload unspecified"
 
-    # When host link is slow (e.g. 0.032 TB/s = 32 GB/s PCIe), it limits throughput
-    res_slow_host = evaluate_moe_decode(
+    # With PCIe host offload link (0.032 TB/s = 32 GB/s, 1.0 ms dispatch latency)
+    b = 8
+    res_serialized = evaluate_moe_decode(
         total_experts=64,
         resident_experts=32,
         top_k=2,
         shared_params_b=8.0,
         total_params_b=40.0,
         bits_per_param=4.5,
-        batch_size=8,
+        batch_size=b,
         kv_cache_per_sequence_gb=1.610612736,
         card_sustained_bw_tb_s=1.4336,
         host_bw_tb_s=0.032,
         host_latency_ms=1.0,
+        offload_mode="serialized",
     )
-    assert res_slow_host.host_aggregate_tps < res_slow_host.card_aggregate_tps
-    assert res_slow_host.combined_aggregate_tps == res_slow_host.host_aggregate_tps
-    assert res_slow_host.limiting_factor == "host offload link"
+    # Verify stage times are positive
+    assert res_serialized.card_step_time_ms > 0.0
+    assert res_serialized.host_step_time_ms > 0.0
+
+    # Numerical verification of Serialized mode: B / (t_card + t_host)
+    t_card_s = res_serialized.card_step_time_ms / 1000.0
+    t_host_s = res_serialized.host_step_time_ms / 1000.0
+    expected_serial_tps = b / (t_card_s + t_host_s)
+    assert pytest.approx(res_serialized.serialized_aggregate_tps, rel=1e-5) == expected_serial_tps
+    assert res_serialized.combined_aggregate_tps == res_serialized.serialized_aggregate_tps
+    assert res_serialized.limiting_factor == "serialized on-card and host transfer"
+
+    # Numerical verification of Overlapped mode: min(TPS_card, TPS_host)
+    res_overlapped = evaluate_moe_decode(
+        total_experts=64,
+        resident_experts=32,
+        top_k=2,
+        shared_params_b=8.0,
+        total_params_b=40.0,
+        bits_per_param=4.5,
+        batch_size=b,
+        kv_cache_per_sequence_gb=1.610612736,
+        card_sustained_bw_tb_s=1.4336,
+        host_bw_tb_s=0.032,
+        host_latency_ms=1.0,
+        offload_mode="overlapped",
+    )
+    expected_overlap_tps = min(res_overlapped.card_aggregate_tps, res_overlapped.host_aggregate_tps)
+    assert pytest.approx(res_overlapped.overlapped_aggregate_tps, rel=1e-5) == expected_overlap_tps
+    assert res_overlapped.combined_aggregate_tps == res_overlapped.overlapped_aggregate_tps
+    assert res_overlapped.limiting_factor == "host offload link"
+
+    # Mathematical certainty: Serialized throughput is strictly less than overlapped throughput
+    assert res_serialized.serialized_aggregate_tps < res_serialized.overlapped_aggregate_tps
 
 
 def test_moe_invalid_inputs():
@@ -144,7 +173,7 @@ def test_moe_invalid_inputs():
             kv_cache_per_sequence_gb=1.6,
             card_sustained_bw_tb_s=1.4336,
         )
-    with pytest.raises(ValueError, match="routing_skew_factor"):
+    with pytest.raises(ValueError, match="offload_mode"):
         evaluate_moe_decode(
             total_experts=64,
             resident_experts=64,
@@ -155,7 +184,7 @@ def test_moe_invalid_inputs():
             batch_size=8,
             kv_cache_per_sequence_gb=1.6,
             card_sustained_bw_tb_s=1.4336,
-            routing_skew_factor=0.8,
+            offload_mode="invalid_mode",
         )
     with pytest.raises(ValueError, match="finite number"):
         calculate_expected_expert_union(expert_count=64, top_k=2, batch_size=float("nan"))
@@ -171,4 +200,5 @@ def test_moe_invalid_inputs():
             kv_cache_per_sequence_gb=1.6,
             card_sustained_bw_tb_s=1.4336,
         )
+
 

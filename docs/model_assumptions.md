@@ -65,18 +65,27 @@ This document formalizes the mathematical equations, hardware simplifications, a
   where $P_{\text{shared}}$ includes embeddings, self-attention, layer norms, and router gating matrices.
 - Individual expert size: $P_{\text{expert}} = P_{\text{routed}} / E$.
 - Active parameters per token: $P_{\text{active}} = P_{\text{shared}} + k \times P_{\text{expert}}$.
+- **Enforced Workload Accounting & Reference Values**:
+  - **Qwen 3.6 35B A3B**: $P_{\text{total}} = 35.0\text{B}$, $P_{\text{shared}} = 2.8\text{B}$, $P_{\text{routed}} = 32.2\text{B}$, $E = 256$, $k = 8$. Per expert: $32.2 / 256 = 0.12578\text{B}$. Active parameters per token: $2.8 + 8 \times 0.12578 = 3.80625\text{B} \approx 3.81\text{B}$ (hence A3B designation).
+  - **Mixtral Parameter Reconciliation**: Previously configured as 12.9B active with 1.5B shared and 45.2B routed across 8 experts ($k=2$). Analytical active count is $1.5 + 2 \times (45.2 / 8) = 1.5 + 11.3 = 12.8\text{B}$. The 12.9B represented an inconsistent rounding discrepancy ($0.1\text{B} > \text{ROUNDING\_TOLERANCE\_B} = 0.05\text{B}$) and has been reconciled to 12.8B.
 
 ### Mathematical Formulations:
-- **Expected Unique Experts**: Under uniform independent routing of top-$k$ distinct choices out of $E$ experts across $B$ tokens:
-  $$\mathbb{E}[U] = E \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
+- **Expected Unique Experts**:
+  - Under uniform independent routing of top-$k$ choices out of $E$ experts across batch $B$:
+    $$\mathbb{E}[U] = E \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
+  - Under an arbitrary expert probability distribution $\mathbf{p} = [p_1, \dots, p_E]$ ($\sum p_i = 1$):
+    $$\mathbb{E}[U] = \sum_{i=1}^E \left[1 - \left(1 - \min(1.0, k \cdot p_i)\right)^B\right]$$
+  - **Routing Skew Semantics**: Routing skew concentrates token assignments onto a smaller subset of popular experts. This mathematically **decreases** or maintains the expected number of distinct active experts ($\mathbb{E}[U_{\text{skewed}}] \le \mathbb{E}[U_{\text{uniform}}]$), reducing total unique expert weight traffic while creating compute load imbalance across workers.
 - **Resident vs. Non-Resident Partitioning**:
   $$\mathbb{E}[U_{\text{res}}] = E_{\text{res}} \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
   $$\mathbb{E}[U_{\text{nonres}}] = (E - E_{\text{res}}) \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
-- **Separate Unoverlapped Ceilings**:
-  The combined throughput is evaluated as the serialized minimum of card memory bandwidth and host link throughput:
-  $$T_{\text{combined}} = \min(T_{\text{card}}, T_{\text{host}})$$
-- **Routing Skew Sensitivity**:
-  An optional multiplier $\sigma \ge 1.0$ (`routing_skew_factor`) is supported to model token concentration on popular experts, while recognizing that production-grade prediction requires trace-driven measurements.
+- **Host-Offload Execution Bounds**:
+  - **Serialized Bound** (conservative / non-overlapped): The stage execution times add sequentially per decoding step:
+    $$t_{\text{step}} = t_{\text{card}} + t_{\text{host}}$$
+    $$T_{\text{serialized}} = \frac{B}{t_{\text{card}} + t_{\text{host}}}$$
+  - **Overlapped Bound** (optimistic / ideal pipelining upper bound): On-card memory retrieval and host PCIe transfers overlap perfectly; throughput is dictated solely by the bottleneck stage:
+    $$T_{\text{overlapped}} = \min(T_{\text{card}}, T_{\text{host}})$$
+  - Clearly, $T_{\text{serialized}} < T_{\text{overlapped}}$ for any non-zero offloaded traffic. Both bounds are reported explicitly in the simulator.
 
 ---
 
@@ -87,5 +96,5 @@ This document formalizes the mathematical equations, hardware simplifications, a
   - `verified`: Independently audited local benchmark traces with locked clocks, confirmed power limits, and bit-level reproducible environments.
 - **Empty Dataset Protection**:
   An empty comparison dataset cannot produce 0% MAPE. Evaluating MAPE against an empty dataset raises a clear `ValueError`.
-- **Controlled Baselines**:
-  Simulations must be calibrated against controlled physical GPU baselines (e.g. H100 SXM 80GB) to establish realistic sustained memory efficiency ($\eta_{\text{eff}} \approx 47\% - 50\%$), while acknowledging that calibrating against a GPU does not prove the performance of proposed unbuilt accelerators.
+- **Algebraic Sanity Checks vs. Empirical Validation**:
+  Comparisons against published literature baselines (e.g. H100 SXM5 80GB) provide an **algebraic sanity check** confirming equation consistency against realistic hardware efficiency gaps ($\eta_{\text{eff}} \approx 47\% - 50\%$). However, such checks do not constitute empirical validation of predictive accuracy for proposed unbuilt accelerators (A48 Base and A216 Advanced), whose figures remain analytical feasibility projections per `AGENTS.md`.

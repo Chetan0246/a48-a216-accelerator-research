@@ -1,14 +1,18 @@
-# Calibration Analysis: Controlled GPU Baseline vs. Analytical Roofline
+# Calibration Analysis: Algebraic Sanity Check against Provisional Literature Baseline
 
 ## 1. Objective
-Establish an explicit, reproducible calibration comparison between the analytical simulator ceilings and a controlled, traceable GPU baseline (NVIDIA H100 SXM 80GB running Meta-Llama-3-8B in FP16), documenting:
-- Theoretical roofline ceilings vs. measured empirical runtime.
-- Observed effective hardware utilization factor ($\eta_{\text{eff}}$).
-- Explicit boundaries: why calibration against an existing GPU baseline **does not** prove predictive accuracy for unbuilt proposed architectures (A48 Base and A216 Advanced).
+Establish an algebraic sanity check comparing analytical simulator roofline equations against provisional published literature figures (NVIDIA H100 SXM5 80GB running Meta-Llama-3-8B in FP16), documenting:
+- Theoretical roofline ceilings vs. published empirical runtime.
+- Observed effective hardware utilization factor ($\eta_{\text{eff}}$) implied by literature figures.
+- Explicit boundaries: why an algebraic sanity check against provisional literature numbers **does not** constitute empirical model validation or prove predictive accuracy for proposed unbuilt accelerators (A48 Base and A216 Advanced).
 
 ---
 
-## 2. Controlled Baseline Configuration
+## 2. Provisional Baseline Configuration (Unverified Literature Figures)
+
+> [!WARNING]
+> **Provisional / Unverified Status**:
+> The H100 baseline records are literature-sourced reference figures marked `unverified` in `benchmarks/benchmark_manifest.csv`. They serve strictly as an algebraic sanity check for formula correctness, not as controlled, independently audited empirical validation.
 
 | Parameter | Value / Source |
 | :--- | :--- |
@@ -18,9 +22,9 @@ Establish an explicit, reproducible calibration comparison between the analytica
 | **Attention Architecture** | 32 layers, 8 KV heads (GQA), 128 head dim |
 | **Context Length ($S$)** | 2,048 tokens |
 | **Output Length** | 256 tokens |
-| **Runtime Software** | vLLM v0.6.0 with FlashAttention-2 |
-| **Measurement Conditions** | Locked clocks, 700W TDP, no concurrent host activity |
-| **Status in Manifest** | `provisional` (literature-sourced; pending local raw trace capture) |
+| **Runtime Software** | vLLM v0.6.0 with FlashAttention-2 (literature reference) |
+| **Measurement Conditions** | Literature reported (unverified environment details) |
+| **Status in Manifest** | `unverified` (provisional literature reference) |
 
 ---
 

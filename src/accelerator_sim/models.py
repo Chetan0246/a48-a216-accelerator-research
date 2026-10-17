@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
+
+ROUNDING_TOLERANCE_B: float = 0.05  # Parameter reconciliation tolerance (50M params on billion-scale specs)
 
 
 @dataclass(frozen=True)
@@ -17,6 +20,7 @@ class SystemConfig:
     runtime_reserve_gb: float = 4.0
     sram_mib: float = 0.0
     topology: str = ""
+    description: str = ""
     peak_fp16_tflops: float = 0.0
     peak_fp8_tflops: float = 0.0
     peak_fp4_tflops: float = 0.0
@@ -63,6 +67,8 @@ class WorkloadConfig:
     num_attention_heads: int
     num_kv_heads: int
     head_dim: int
+    intermediate_size: int | None = None
+    vocab_size: int | None = None
     is_moe: bool = False
     num_experts: int = 1
     experts_per_token: int = 1
@@ -94,6 +100,10 @@ class WorkloadConfig:
             raise ValueError("num_layers and hidden_size must be positive")
         if self.num_attention_heads <= 0 or self.num_kv_heads <= 0 or self.head_dim <= 0:
             raise ValueError("Attention head dimensions must be positive")
+        if self.intermediate_size is not None and self.intermediate_size <= 0:
+            raise ValueError("intermediate_size must be positive")
+        if self.vocab_size is not None and self.vocab_size <= 0:
+            raise ValueError("vocab_size must be positive")
         if self.bits_per_param <= 0:
             raise ValueError("bits_per_param must be positive")
 
@@ -109,16 +119,6 @@ class WorkloadConfig:
             if not (0.0 < self.routed_expert_params_b <= self.total_parameters_b):
                 raise ValueError("routed_expert_params_b must be > 0 and <= total_parameters_b")
 
-        # Validate split consistency if both are given
-        if self.shared_params_b is not None and self.routed_expert_params_b is not None:
-            split_total = self.shared_params_b + self.routed_expert_params_b
-            if abs(split_total - self.total_parameters_b) > 0.05:
-                raise ValueError(
-                    f"Inconsistent parameter accounting: shared_params_b ({self.shared_params_b}) + "
-                    f"routed_expert_params_b ({self.routed_expert_params_b}) = {split_total} "
-                    f"does not match total_parameters_b ({self.total_parameters_b})"
-                )
-
         if self.is_moe:
             if self.num_experts < 1:
                 raise ValueError("num_experts must be >= 1 for MoE")
@@ -127,3 +127,101 @@ class WorkloadConfig:
                     f"experts_per_token ({self.experts_per_token}) must satisfy "
                     f"1 <= experts_per_token <= num_experts ({self.num_experts})"
                 )
+
+            # Complete MoE workloads require explicit parameter decomposition
+            if self.is_complete and (self.shared_params_b is None or self.routed_expert_params_b is None):
+                raise ValueError(
+                    f"MoE workload '{self.key}' is marked complete but requires explicit "
+                    "shared_params_b and routed_expert_params_b"
+                )
+
+            # Validate split consistency if both are given
+            if self.shared_params_b is not None and self.routed_expert_params_b is not None:
+                split_total = self.shared_params_b + self.routed_expert_params_b
+                if abs(split_total - self.total_parameters_b) > ROUNDING_TOLERANCE_B:
+                    raise ValueError(
+                        f"Inconsistent parameter accounting for '{self.key}': "
+                        f"shared_params_b ({self.shared_params_b}) + "
+                        f"routed_expert_params_b ({self.routed_expert_params_b}) = {split_total:.4f} "
+                        f"does not match total_parameters_b ({self.total_parameters_b}) "
+                        f"within tolerance {ROUNDING_TOLERANCE_B}B."
+                    )
+
+                # Validate active parameter consistency against decomposition
+                expected_active = self.shared_params_b + self.experts_per_token * (
+                    self.routed_expert_params_b / float(self.num_experts)
+                )
+                if abs(self.active_parameters_b - expected_active) > ROUNDING_TOLERANCE_B:
+                    raise ValueError(
+                        f"Inconsistent active parameter count for '{self.key}': "
+                        f"configured active_parameters_b ({self.active_parameters_b}) does not match "
+                        f"reconciled shared + top_k * expert decomposition ({expected_active:.4f}) "
+                        f"within tolerance {ROUNDING_TOLERANCE_B}B."
+                    )
+
+
+def _find_default_config_path(filename: str) -> str:
+    import os
+
+    cwd = os.getcwd()
+    candidate = os.path.join(cwd, "configs", filename)
+    if os.path.isfile(candidate):
+        return candidate
+    base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    candidate = os.path.join(base, "configs", filename)
+    if os.path.isfile(candidate):
+        return candidate
+    return os.path.join("configs", filename)
+
+
+def load_systems_config(config_source: str | dict[str, Any] | None = None) -> dict[str, SystemConfig]:
+    """Loads and validates accelerator system configurations through SystemConfig."""
+    import json
+    import os
+
+    if config_source is None:
+        config_source = _find_default_config_path("systems.json")
+
+    if isinstance(config_source, str):
+        if not os.path.isfile(config_source):
+            raise FileNotFoundError(f"Systems configuration file not found: {config_source}")
+        with open(config_source, "r", encoding="utf-8") as f:
+            raw_dict = json.load(f)
+    elif isinstance(config_source, dict):
+        raw_dict = config_source
+    else:
+        raise TypeError(f"config_source must be a file path or dict, got {type(config_source)}")
+
+    systems: dict[str, SystemConfig] = {}
+    for key, data in raw_dict.items():
+        data_clean = dict(data)
+        data_clean.pop("key", None)
+        systems[key] = SystemConfig(key=key, **data_clean)
+    return systems
+
+
+def load_workloads_config(config_source: str | dict[str, Any] | None = None) -> dict[str, WorkloadConfig]:
+    """Loads and validates workload configurations through WorkloadConfig."""
+    import json
+    import os
+
+    if config_source is None:
+        config_source = _find_default_config_path("workloads.json")
+
+    if isinstance(config_source, str):
+        if not os.path.isfile(config_source):
+            raise FileNotFoundError(f"Workloads configuration file not found: {config_source}")
+        with open(config_source, "r", encoding="utf-8") as f:
+            raw_dict = json.load(f)
+    elif isinstance(config_source, dict):
+        raw_dict = config_source
+    else:
+        raise TypeError(f"config_source must be a file path or dict, got {type(config_source)}")
+
+    workloads: dict[str, WorkloadConfig] = {}
+    for key, data in raw_dict.items():
+        data_clean = dict(data)
+        data_clean.pop("key", None)
+        workloads[key] = WorkloadConfig(key=key, **data_clean)
+    return workloads
+

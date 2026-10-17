@@ -67,8 +67,12 @@ def test_empty_calibration_dataset_raises_value_error():
         calib_unver.compute_mape(metric="tpot", verified_only=True)
 
 
-def test_controlled_gpu_baseline_calibration():
-    """Calibrate analytical roofline ceiling against controlled H100 GPU baseline."""
+def test_gpu_baseline_algebraic_sanity_check():
+    """Algebraic sanity check: compare analytical roofline ceiling against provisional H100 literature baseline.
+
+    NOTE: This is an algebraic sanity check against unverified published literature records,
+    NOT an empirical validation of predictive accuracy for proposed accelerators.
+    """
     # Llama-3-8B FP16
     weights_gb = calculate_stored_weights_gb(params_b=8.03, bits_per_param=16.0)
     assert pytest.approx(weights_gb, rel=1e-4) == 16.06
@@ -93,13 +97,13 @@ def test_controlled_gpu_baseline_calibration():
     ideal_step_ms_b1 = (ideal_b1.total_step_traffic_gb / ideal_b1.sustained_bandwidth_gb_s) * 1000.0
     assert pytest.approx(ideal_step_ms_b1, rel=1e-3) == 4.874
 
-    # Measured TPOT from manifest: 9.8 ms
+    # Measured TPOT from manifest: 9.8 ms (unverified literature record)
     measured_tpot_b1 = 9.8
     empirical_eff_b1 = ideal_step_ms_b1 / measured_tpot_b1
-    # Observed sustained efficiency on GPU baseline is ~49.7%
+    # Observed sustained efficiency on provisional literature baseline is ~49.7%
     assert pytest.approx(empirical_eff_b1, rel=1e-2) == 0.497
 
-    # 2. When calibrated with this empirical derating factor (eta = 0.4973), predicted TPOT matches measured
+    # 2. When derated with this empirical factor (eta = 0.4973), predicted TPOT matches provisional value
     calibrated_b1 = calculate_decode_bandwidth_ceiling(
         peak_bandwidth_tb_s=h100_peak_tb_s,
         effective_bandwidth_fraction=empirical_eff_b1,

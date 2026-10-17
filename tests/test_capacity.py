@@ -163,7 +163,7 @@ def test_malformed_workload_config_rejection():
             key="inconsistent_moe",
             name="Inconsistent MoE",
             total_parameters_b=46.7,
-            active_parameters_b=12.9,
+            active_parameters_b=12.8,
             num_layers=32,
             hidden_size=4096,
             num_attention_heads=32,
@@ -176,12 +176,49 @@ def test_malformed_workload_config_rejection():
             routed_expert_params_b=30.0,  # 5 + 30 = 35 != 46.7
         )
 
-    # Accept consistent parameter split
+    # Reject inconsistent active parameter count (e.g. legacy unreconciled 12.9 vs analytical 12.8)
+    with pytest.raises(ValueError, match="Inconsistent active parameter count"):
+        WorkloadConfig(
+            key="unreconciled_moe",
+            name="Unreconciled MoE",
+            total_parameters_b=46.7,
+            active_parameters_b=12.9,  # 1.5 + 2 * (45.2 / 8) = 12.8 != 12.9
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=8,
+            head_dim=128,
+            is_moe=True,
+            num_experts=8,
+            experts_per_token=2,
+            shared_params_b=1.5,
+            routed_expert_params_b=45.2,
+        )
+
+    # Reject complete MoE without explicit split
+    with pytest.raises(ValueError, match="requires explicit shared_params_b and routed_expert_params_b"):
+        WorkloadConfig(
+            key="missing_split_moe",
+            name="Missing Split MoE",
+            total_parameters_b=46.7,
+            active_parameters_b=12.8,
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=8,
+            head_dim=128,
+            is_moe=True,
+            num_experts=8,
+            experts_per_token=2,
+            is_complete=True,
+        )
+
+    # Accept consistent parameter split and reconciled active parameter count (12.8B)
     valid_moe = WorkloadConfig(
         key="consistent_moe",
         name="Consistent MoE",
         total_parameters_b=46.7,
-        active_parameters_b=12.9,
+        active_parameters_b=12.8,
         num_layers=32,
         hidden_size=4096,
         num_attention_heads=32,
@@ -195,6 +232,27 @@ def test_malformed_workload_config_rejection():
     )
     assert valid_moe.shared_params_b == 1.5
     assert valid_moe.routed_expert_params_b == 45.2
+
+
+def test_load_workloads_config_includes_qwen_35b():
+    from accelerator_sim.models import load_workloads_config
+
+    workloads = load_workloads_config()
+    assert "qwen-3.6-35b-a3b" in workloads
+    qwen = workloads["qwen-3.6-35b-a3b"]
+    assert qwen.total_parameters_b == 35.0
+    assert qwen.shared_params_b == 2.8
+    assert qwen.routed_expert_params_b == 32.2
+    assert qwen.num_experts == 256
+    assert qwen.experts_per_token == 8
+    assert qwen.active_parameters_b == 3.81
+    assert qwen.is_complete is True
+    assert qwen.status == "supported"
+
+    # Verify incomplete MLA workload is loaded with complete=False
+    assert "deepseek-v2-lite" in workloads
+    assert workloads["deepseek-v2-lite"].is_complete is False
+    assert workloads["deepseek-v2-lite"].attention_type == "mla"
 
 
 def test_capacity_non_finite_inputs():

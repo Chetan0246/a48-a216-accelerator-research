@@ -1,10 +1,8 @@
 """Command Line Interface for the Accelerator Simulator."""
 
 import argparse
-import json
 import os
 import sys
-from typing import Any
 
 try:
     from .capacity import evaluate_capacity
@@ -12,6 +10,11 @@ try:
     from .kv_cache import (
         KVCacheShape,
         calculate_kv_cache_per_sequence_gb,
+    )
+    from .models import (
+        WorkloadConfig,
+        load_systems_config,
+        load_workloads_config,
     )
     from .moe import evaluate_moe_decode
     from .prefill import (
@@ -28,6 +31,11 @@ except (ImportError, ValueError):
         KVCacheShape,
         calculate_kv_cache_per_sequence_gb,
     )
+    from accelerator_sim.models import (
+        WorkloadConfig,
+        load_systems_config,
+        load_workloads_config,
+    )
     from accelerator_sim.moe import evaluate_moe_decode
     from accelerator_sim.prefill import (
         calculate_prefill_tflop,
@@ -35,19 +43,12 @@ except (ImportError, ValueError):
     )
 
 
-def load_json_file(file_path: str) -> dict[str, Any]:
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Config file not found: {file_path}")
-    with open(file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
 def find_config_dir() -> str:
     cwd = os.getcwd()
     candidate = os.path.join(cwd, "configs")
     if os.path.isdir(candidate):
         return candidate
-    base = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     candidate = os.path.join(base, "configs")
     if os.path.isdir(candidate):
         return candidate
@@ -65,11 +66,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--params-b", type=float, default=32.0, help="Total parameters in billions")
     p.add_argument("--bits-per-param", type=float, default=4.5, help="Effective weight precision in bits")
     p.add_argument("--shared-params-b", type=float, default=0.0, help="MoE shared parameters in billions")
+    p.add_argument("--routed-params-b", type=float, default=None, help="MoE routed parameters in billions")
     p.add_argument("--experts", type=int, default=64, help="Total routed experts in MoE")
     p.add_argument("--top-k", type=int, default=2, help="Experts selected per token")
     p.add_argument("--resident-experts", type=int, default=None, help="Experts resident on accelerator")
     p.add_argument("--host-expert-bandwidth-tb-s", type=float, default=0.0, help="Host-offload bandwidth in TB/s")
     p.add_argument("--host-expert-latency-ms", type=float, default=0.0, help="Host-offload per-step latency in ms")
+    p.add_argument(
+        "--offload-mode",
+        choices=("serialized", "overlapped"),
+        default="serialized",
+        help="Host-offload execution bound: serialized (conservative) or overlapped (optimistic ceiling)",
+    )
     p.add_argument("--layers", type=int, default=48, help="Transformer layer count")
     p.add_argument("--kv-heads", type=int, default=8, help="KV heads count")
     p.add_argument("--head-dim", type=int, default=128, help="Dimension per attention head")
@@ -91,8 +99,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     cfg_dir = find_config_dir()
-    systems_data = load_json_file(os.path.join(cfg_dir, "systems.json"))
-    workloads_data = load_json_file(os.path.join(cfg_dir, "workloads.json"))
+    systems_data = load_systems_config(os.path.join(cfg_dir, "systems.json"))
+    workloads_data = load_workloads_config(os.path.join(cfg_dir, "workloads.json"))
 
     # System lookup
     sys_key = args.system.upper()
@@ -109,35 +117,57 @@ def main(argv=None):
     head_dim = args.head_dim
     bits_per_param = args.bits_per_param
     shared_params_b = args.shared_params_b
+    routed_params_b = args.routed_params_b
     experts = args.experts
     top_k = args.top_k
-
     attention_type = "gqa"
 
     if args.workload:
         if args.workload not in workloads_data:
             raise ValueError(f"Workload '{args.workload}' not found. Available: {list(workloads_data.keys())}")
         wl = workloads_data[args.workload]
-        if not wl.get("is_complete", True) or wl.get("attention_type") in ("mla", "latent"):
+        if not wl.is_complete or wl.attention_type in ("mla", "latent"):
             raise ValueError(
-                f"Workload '{args.workload}' is marked incomplete ({wl.get('status', 'incomplete')}) "
-                f"with attention_type='{wl.get('attention_type')}'. Evaluation is deferred until dedicated "
+                f"Workload '{args.workload}' is marked incomplete ({wl.status}) "
+                f"with attention_type='{wl.attention_type}'. Evaluation is deferred until dedicated "
                 "architecture modeling is implemented."
             )
-        params_b = wl.get("total_parameters_b", params_b)
-        model_type = "moe" if wl.get("is_moe", False) else "dense"
-        layers = wl.get("num_layers", layers)
-        kv_heads = wl.get("num_kv_heads", kv_heads)
-        head_dim = wl.get("head_dim", head_dim)
-        bits_per_param = wl.get("bits_per_param", bits_per_param)
-        shared_params_b = wl.get("shared_params_b", shared_params_b)
-        experts = wl.get("num_experts", experts)
-        top_k = wl.get("experts_per_token", top_k)
-        attention_type = wl.get("attention_type", "gqa")
+        params_b = wl.total_parameters_b
+        model_type = "moe" if wl.is_moe else "dense"
+        layers = wl.num_layers
+        kv_heads = wl.num_kv_heads
+        head_dim = wl.head_dim
+        bits_per_param = wl.bits_per_param
+        shared_params_b = wl.shared_params_b if wl.shared_params_b is not None else 0.0
+        routed_params_b = wl.routed_expert_params_b
+        experts = wl.num_experts
+        top_k = wl.experts_per_token
+        attention_type = wl.attention_type
+    elif model_type == "moe":
+        # Validate manual MoE configuration through WorkloadConfig
+        routed = routed_params_b if routed_params_b is not None else (params_b - shared_params_b)
+        active_est = shared_params_b + top_k * (routed / float(experts))
+        WorkloadConfig(
+            key="cli_manual_moe",
+            name="CLI Manual MoE",
+            total_parameters_b=params_b,
+            active_parameters_b=active_est,
+            num_layers=layers,
+            hidden_size=4096,
+            num_attention_heads=kv_heads,
+            num_kv_heads=kv_heads,
+            head_dim=head_dim,
+            is_moe=True,
+            num_experts=experts,
+            experts_per_token=top_k,
+            shared_params_b=shared_params_b,
+            routed_expert_params_b=routed,
+            is_complete=True,
+        )
 
     # Hardware specs
-    physical_mem_gb = float(sys_cfg["memory_capacity_gb"])
-    peak_bw_tb_s = float(sys_cfg["peak_bandwidth_tb_s"])
+    physical_mem_gb = sys_cfg.memory_capacity_gb
+    peak_bw_tb_s = sys_cfg.peak_bandwidth_tb_s
     eff_bw_frac = args.effective_bandwidth_fraction
     sustained_bw_tb_s = peak_bw_tb_s * eff_bw_frac
     runtime_reserve = args.runtime_reserve_gb
@@ -155,8 +185,8 @@ def main(argv=None):
     kv_total_gb = kv_per_seq_gb * args.batch
 
     print("=" * 70)
-    print(f" ACCELERATOR SIMULATOR: {sys_cfg.get('name', args.system)}")
-    print(f" Topology: {sys_cfg.get('topology', 'N/A')}")
+    print(f" ACCELERATOR SIMULATOR: {sys_cfg.name}")
+    print(f" Topology: {sys_cfg.topology or 'N/A'}")
     print(f" Memory: {physical_mem_gb:.1f} GB | Peak BW: {peak_bw_tb_s:.3f} TB/s | Sustained: {sustained_bw_tb_s:.3f} TB/s ({eff_bw_frac:.0%})")
     print("=" * 70)
 
@@ -219,6 +249,7 @@ def main(argv=None):
             card_sustained_bw_tb_s=sustained_bw_tb_s,
             host_bw_tb_s=args.host_expert_bandwidth_tb_s,
             host_latency_ms=args.host_expert_latency_ms,
+            offload_mode=args.offload_mode,
         )
         print(f"\n[1] MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE {params_b:.1f}B)")
         print(f"  - Routed Experts:       {experts} total, top-{top_k} active/token")
@@ -228,14 +259,16 @@ def main(argv=None):
         print(f"  - Expected Nonresident: {moe_res.expected_nonresident_union:.4f} unique experts")
 
         print("\n[2] DECODE THROUGHPUT CEILING (MoE)")
-        print(f"  - Card Weight Traffic:  {moe_res.card_weight_traffic_gb:.3f} GB/step")
-        print(f"  - Host Weight Traffic:  {moe_res.host_weight_traffic_gb:.3f} GB/step")
+        print(f"  - Card Weight Traffic:  {moe_res.card_weight_traffic_gb:.3f} GB/step ({moe_res.card_step_time_ms:.2f} ms)")
+        print(f"  - Host Weight Traffic:  {moe_res.host_weight_traffic_gb:.3f} GB/step ({moe_res.host_step_time_ms:.2f} ms)")
         print(f"  - Card Aggregate TPS:   {moe_res.card_aggregate_tps:.2f} tokens/s")
         if resident < experts and args.host_expert_bandwidth_tb_s == 0.0:
             print("  - Host Aggregate TPS:   NOT COMPUTED (supply --host-expert-bandwidth-tb-s)")
         else:
             print(f"  - Host Aggregate TPS:   {moe_res.host_aggregate_tps:.2f} tokens/s")
-        print(f"  - Combined Decode TPS:  {moe_res.combined_aggregate_tps:.2f} tokens/s ({moe_res.per_sequence_tps:.2f} tok/s/seq)")
+        print(f"  - Serialized Bound TPS: {moe_res.serialized_aggregate_tps:.2f} tokens/s")
+        print(f"  - Overlapped Bound TPS: {moe_res.overlapped_aggregate_tps:.2f} tokens/s")
+        print(f"  - Selected Bound ({moe_res.offload_mode}): {moe_res.combined_aggregate_tps:.2f} tokens/s ({moe_res.per_sequence_tps:.2f} tok/s/seq)")
         print(f"  - Primary Limiter:      {moe_res.limiting_factor}")
 
     print("\n" + "=" * 70)

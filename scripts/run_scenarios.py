@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Run evaluation scenarios across systems and workloads and save results."""
 
-import json
 import os
 import sys
 
@@ -19,6 +18,10 @@ from accelerator_sim.kv_cache import (
     KVCacheShape,
     calculate_kv_cache_per_sequence_gb,
 )
+from accelerator_sim.models import (
+    load_systems_config,
+    load_workloads_config,
+)
 from accelerator_sim.moe import evaluate_moe_decode
 from accelerator_sim.prefill import (
     calculate_prefill_tflop,
@@ -28,10 +31,8 @@ from accelerator_sim.prefill import (
 
 def main():
     configs_dir = os.path.join(PROJECT_ROOT, "configs")
-    with open(os.path.join(configs_dir, "systems.json"), "r") as f:
-        systems = json.load(f)
-    with open(os.path.join(configs_dir, "workloads.json"), "r") as f:
-        workloads = json.load(f)
+    systems = load_systems_config(os.path.join(configs_dir, "systems.json"))
+    workloads = load_workloads_config(os.path.join(configs_dir, "workloads.json"))
 
     results_dir = os.path.join(PROJECT_ROOT, "results")
     os.makedirs(os.path.join(results_dir, "capacity"), exist_ok=True)
@@ -45,34 +46,33 @@ def main():
     batch_sizes = [1, 4, 8, 16]
 
     for sys_name, sys_cfg in systems.items():
-        physical_mem_gb = float(sys_cfg["memory_capacity_gb"])
-        peak_bw_tb_s = float(sys_cfg["peak_bandwidth_tb_s"])
-        eff_bw_fraction = float(sys_cfg.get("effective_bandwidth_fraction", 0.8))
-        runtime_reserve_gb = float(sys_cfg.get("runtime_reserve_gb", 4.0))
+        physical_mem_gb = sys_cfg.memory_capacity_gb
+        peak_bw_tb_s = sys_cfg.peak_bandwidth_tb_s
+        eff_bw_fraction = sys_cfg.effective_bandwidth_fraction
+        runtime_reserve_gb = sys_cfg.runtime_reserve_gb
 
-        for wl_name, wl_cfg in workloads.items():
-            is_complete = bool(wl_cfg.get("is_complete", True))
-            attention_type = str(wl_cfg.get("attention_type", "gqa")).lower()
+        for wl_name, wl in workloads.items():
+            attention_type = wl.attention_type.lower()
 
-            if not is_complete or attention_type in ("mla", "latent"):
+            if not wl.is_complete or attention_type in ("mla", "latent"):
                 print(
-                    f"Notice: Workload '{wl_name}' is marked incomplete ({wl_cfg.get('status', 'incomplete')}) "
+                    f"Notice: Workload '{wl_name}' is marked incomplete ({wl.status}) "
                     f"with attention_type='{attention_type}'. Excluding from standard K/V cache and decode "
                     "calculations until dedicated architecture modeling is implemented."
                 )
                 continue
 
-            params_b = float(wl_cfg["total_parameters_b"])
-            bits_per_param = float(wl_cfg.get("bits_per_param", 4.5))
-            layers = int(wl_cfg["num_layers"])
-            kv_heads = int(wl_cfg["num_kv_heads"])
-            head_dim = int(wl_cfg["head_dim"])
-            is_moe = bool(wl_cfg.get("is_moe", False))
-            experts = int(wl_cfg.get("num_experts", 1))
-            top_k = int(wl_cfg.get("experts_per_token", 1))
-            shared_params_b = float(wl_cfg.get("shared_params_b", 0.0))
+            params_b = wl.total_parameters_b
+            bits_per_param = wl.bits_per_param
+            layers = wl.num_layers
+            kv_heads = wl.num_kv_heads
+            head_dim = wl.head_dim
+            is_moe = wl.is_moe
+            experts = wl.num_experts
+            top_k = wl.experts_per_token
+            shared_params_b = wl.shared_params_b if wl.shared_params_b is not None else 0.0
 
-            context_len = int(wl_cfg.get("default_context_len", 8192))
+            context_len = wl.default_context_len
             kv_shape = KVCacheShape(
                 num_layers=layers,
                 num_kv_heads=kv_heads,
@@ -106,7 +106,7 @@ def main():
                 })
 
                 # Prefill
-                active_params_b = float(wl_cfg.get("active_parameters_b", params_b))
+                active_params_b = wl.active_parameters_b
                 p_tflop = calculate_prefill_tflop(active_params_b, context_len, b)
                 req_tflops = calculate_required_prefill_throughput(p_tflop, target_ttft_seconds=3.0)
                 prefill_records.append({
@@ -130,6 +130,7 @@ def main():
                         batch_size=b,
                         kv_cache_per_sequence_gb=kv_per_seq_gb,
                         card_sustained_bw_tb_s=peak_bw_tb_s * eff_bw_fraction,
+                        offload_mode="serialized",
                     )
                     decode_records.append({
                         "system": sys_name,
@@ -138,6 +139,8 @@ def main():
                         "expected_active_experts": round(moe_res.expected_total_union, 4),
                         "card_weight_traffic_gb": round(moe_res.card_weight_traffic_gb, 3),
                         "aggregate_tps": round(moe_res.combined_aggregate_tps, 2),
+                        "serialized_aggregate_tps": round(moe_res.serialized_aggregate_tps, 2),
+                        "overlapped_aggregate_tps": round(moe_res.overlapped_aggregate_tps, 2),
                         "per_sequence_tps": round(moe_res.per_sequence_tps, 2),
                     })
                 else:
@@ -155,6 +158,8 @@ def main():
                         "expected_active_experts": 1.0,
                         "card_weight_traffic_gb": round(dec_res.weight_traffic_gb, 3),
                         "aggregate_tps": round(dec_res.aggregate_tps, 2),
+                        "serialized_aggregate_tps": round(dec_res.aggregate_tps, 2),
+                        "overlapped_aggregate_tps": round(dec_res.aggregate_tps, 2),
                         "per_sequence_tps": round(dec_res.per_sequence_tps, 2),
                     })
 
