@@ -2,6 +2,7 @@
 
 import csv
 import os
+import warnings
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 
@@ -21,7 +22,12 @@ class BenchmarkRecord:
     measured_throughput_tps: Optional[float]
     source: str
     benchmark_conditions: str
+    verification_status: str = "provisional"  # "verified" or "provisional"
     notes: str = ""
+
+    @property
+    def is_verified(self) -> bool:
+        return self.verification_status.strip().lower() == "verified"
 
 
 class BenchmarkManifest:
@@ -41,6 +47,7 @@ class BenchmarkManifest:
         "measured_throughput_tps",
         "source",
         "benchmark_conditions",
+        "verification_status",
         "notes",
     ]
 
@@ -74,7 +81,8 @@ class BenchmarkManifest:
                     measured_throughput_tps=float(row["measured_throughput_tps"]) if row["measured_throughput_tps"] else None,
                     source=row["source"].strip(),
                     benchmark_conditions=row["benchmark_conditions"].strip(),
-                    notes=row["notes"].strip(),
+                    verification_status=row.get("verification_status", "provisional").strip(),
+                    notes=row.get("notes", "").strip(),
                 )
                 records.append(rec)
 
@@ -83,9 +91,15 @@ class BenchmarkManifest:
     def filter_by_hardware(self, hardware_name: str) -> List[BenchmarkRecord]:
         return [r for r in self.records if hardware_name.lower() in r.hardware_name.lower()]
 
+    def get_verified_records(self) -> List[BenchmarkRecord]:
+        return [r for r in self.records if r.is_verified]
+
+    def get_provisional_records(self) -> List[BenchmarkRecord]:
+        return [r for r in self.records if not r.is_verified]
+
 
 class CalibrationModel:
-    """Computes alignment metrics between simulation outputs and verified empirical data."""
+    """Computes alignment metrics between analytical simulation ceilings and empirical data."""
 
     def __init__(self):
         self.comparison_pairs: List[Dict[str, Any]] = []
@@ -96,19 +110,34 @@ class CalibrationModel:
         metric: str,
         measured: float,
         simulated: float,
+        verification_status: str = "provisional",
     ):
         if measured <= 0:
             raise ValueError("measured value must be positive")
+        if simulated <= 0:
+            raise ValueError("simulated value must be positive")
+
+        if verification_status != "verified":
+            warnings.warn(
+                f"Comparison for {benchmark_id} is against a {verification_status} benchmark. "
+                "Do not claim predictive accuracy until verified.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         self.comparison_pairs.append({
             "benchmark_id": benchmark_id,
             "metric": metric,
             "measured": measured,
             "simulated": simulated,
+            "verification_status": verification_status,
             "abs_percentage_error": abs(simulated - measured) / measured * 100.0,
         })
 
-    def compute_mape(self, metric: Optional[str] = None) -> float:
+    def compute_mape(self, metric: Optional[str] = None, verified_only: bool = False) -> float:
         pairs = self.comparison_pairs
+        if verified_only:
+            pairs = [p for p in pairs if p["verification_status"] == "verified"]
         if metric:
             pairs = [p for p in pairs if p["metric"] == metric]
         if not pairs:

@@ -28,11 +28,20 @@ def calculate_usable_memory_gb(physical_memory_gb: float, runtime_reserve_gb: fl
 
     Returns:
         Usable memory in decimal GB.
+
+    Raises:
+        ValueError: If physical_memory_gb <= 0, runtime_reserve_gb < 0, or
+            runtime_reserve_gb >= physical_memory_gb.
     """
     if physical_memory_gb <= 0:
         raise ValueError("physical_memory_gb must be positive")
     if runtime_reserve_gb < 0:
         raise ValueError("runtime_reserve_gb cannot be negative")
+    if runtime_reserve_gb >= physical_memory_gb:
+        raise ValueError(
+            f"runtime_reserve_gb ({runtime_reserve_gb} GB) must be strictly less than "
+            f"physical_memory_gb ({physical_memory_gb} GB)"
+        )
     return physical_memory_gb - runtime_reserve_gb
 
 
@@ -72,9 +81,23 @@ def evaluate_capacity(
 
     Returns:
         CapacityEvaluation breakdown.
+
+    Raises:
+        ValueError: If inputs are invalid or runtime_reserve_gb >= physical_memory_gb.
     """
+    if physical_memory_gb <= 0:
+        raise ValueError("physical_memory_gb must be positive")
+    if params_b <= 0 or bits_per_param <= 0:
+        raise ValueError("params_b and bits_per_param must be positive")
     if kv_cache_gb < 0:
         raise ValueError("kv_cache_gb cannot be negative")
+    if runtime_reserve_gb < 0:
+        raise ValueError("runtime_reserve_gb cannot be negative")
+    if runtime_reserve_gb >= physical_memory_gb:
+        raise ValueError(
+            f"runtime_reserve_gb ({runtime_reserve_gb} GB) must be strictly less than "
+            f"physical_memory_gb ({physical_memory_gb} GB)"
+        )
 
     weights_gb = calculate_stored_weights_gb(params_b, bits_per_param)
     usable_gb = calculate_usable_memory_gb(physical_memory_gb, runtime_reserve_gb)

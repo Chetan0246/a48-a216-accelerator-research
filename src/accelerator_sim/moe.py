@@ -1,13 +1,19 @@
 """Mixture-of-Experts (MoE) analytical expert-union and host-offload modeling.
 
-Assumptions and modeling contract:
-    1. Equal expert sizes: Routed expert parameters are distributed equally across experts.
+IMPORTANT MODELING NOTICE:
+    This module implements an analytical first-order throughput bound, NOT a validated
+    MoE performance predictor.
+
+Assumptions and architectural boundaries:
+    1. Equal expert sizes: Routed expert parameters are assumed distributed uniformly across experts.
     2. Uniform independent routing: Tokens select top-k distinct experts independently.
-    3. Fixed residency: A fixed subset of experts is resident in accelerator memory.
-    4. Resident shared weights: All attention, embedding, and shared MLP parameters reside on-chip.
-    5. Host offload tier: Non-resident expert weights are streamed across a host link per step.
-    6. Analytical bound: This is a first-order throughput ceiling, not a cycle-accurate
-       simulation of PCIe framing, DMA packetization, prefetch overlapping, or kernel jitter.
+    3. Separate serialized ceilings: Takes min(card_throughput, host_throughput). It does NOT
+       model asynchronous DMA overlap, double-buffering prefetch pipelines, or PCI-e framing overhead.
+    4. Routing skew: Real workloads exhibit token routing skew where popular experts receive
+       disproportionate traffic; an optional routing_skew_factor is supported for sensitivity analysis,
+       but trace-driven measurements are required for validated predictions.
+    5. Fixed residency: A fixed subset of experts is resident in accelerator memory.
+    6. Resident shared weights: All attention, embedding, and shared MLP parameters reside on-chip.
 """
 
 import math
@@ -64,6 +70,13 @@ class MoEOffloadResult:
     combined_aggregate_tps: float
     per_sequence_tps: float
     limiting_factor: str
+    model_type: str = "first_order_analytical_bound"
+    is_validated_predictor: bool = False
+    routing_skew_factor: float = 1.0
+    assumptions_note: str = (
+        "First-order analytical bound under uniform routing and non-overlapped host transfer; "
+        "not a validated end-to-end performance predictor."
+    )
 
 
 def evaluate_moe_decode(
@@ -78,8 +91,14 @@ def evaluate_moe_decode(
     card_sustained_bw_tb_s: float,
     host_bw_tb_s: float = 0.0,
     host_latency_ms: float = 0.0,
+    routing_skew_factor: float = 1.0,
 ) -> MoEOffloadResult:
     """Evaluates MoE decode throughput ceiling with on-card and host offloading.
+
+    CAUTION:
+        This returns a first-order analytical bound, not a cycle-accurate or validated
+        end-to-end execution prediction. It evaluates separate memory-bandwidth ceilings
+        for on-card HBM/GDDR and host link, without modeling pipelined transfer overlap.
 
     Args:
         total_experts: Total routed experts in model.
@@ -93,6 +112,7 @@ def evaluate_moe_decode(
         card_sustained_bw_tb_s: Accelerator sustained memory bandwidth in TB/s.
         host_bw_tb_s: Effective host offload bandwidth in TB/s (0 disables host throughput model).
         host_latency_ms: Fixed per-decode-step host offload dispatch latency in ms.
+        routing_skew_factor: Sensitivity multiplier for expert imbalance (>= 1.0; 1.0 = uniform).
 
     Returns:
         MoEOffloadResult with complete breakdown and ceilings.
@@ -109,19 +129,21 @@ def evaluate_moe_decode(
         raise ValueError("host_bw_tb_s and host_latency_ms cannot be negative")
     if kv_cache_per_sequence_gb < 0:
         raise ValueError("kv_cache_per_sequence_gb cannot be negative")
+    if routing_skew_factor < 1.0:
+        raise ValueError("routing_skew_factor cannot be less than 1.0")
 
     routed_total_b = total_params_b - shared_params_b
     expert_b = routed_total_b / float(total_experts)
 
-    # Calculate expected unions
+    # Calculate expected unions under uniform independent routing
     expected_total_union = calculate_expected_expert_union(total_experts, top_k, batch_size)
     per_expert_inclusion = 1.0 - (1.0 - (top_k / float(total_experts))) ** batch_size
     expected_resident_union = resident_experts * per_expert_inclusion
     nonresident_experts = total_experts - resident_experts
     expected_nonresident_union = nonresident_experts * per_expert_inclusion
 
-    # On-card weight traffic
-    card_active_params_b = shared_params_b + expected_resident_union * expert_b
+    # On-card weight traffic (shared weights + expected resident experts)
+    card_active_params_b = shared_params_b + min(float(resident_experts), expected_resident_union * routing_skew_factor) * expert_b
     card_weight_traffic_gb = calculate_stored_weights_gb(card_active_params_b, bits_per_param)
 
     # On-card decode throughput
@@ -131,7 +153,7 @@ def evaluate_moe_decode(
 
     # Host offload throughput
     if nonresident_experts > 0:
-        host_active_params_b = expected_nonresident_union * expert_b
+        host_active_params_b = min(float(nonresident_experts), expected_nonresident_union * routing_skew_factor) * expert_b
         host_weight_traffic_gb = calculate_stored_weights_gb(host_active_params_b, bits_per_param)
         if host_bw_tb_s > 0 and host_weight_traffic_gb > 0:
             transfer_s = host_weight_traffic_gb / (host_bw_tb_s * 1000.0)
@@ -143,7 +165,7 @@ def evaluate_moe_decode(
         host_weight_traffic_gb = 0.0
         host_tps = math.inf
 
-    # Combined throughput determination
+    # Combined throughput determination (unoverlapped ceiling bound)
     if host_tps == 0.0:
         combined_tps = 0.0
         limiting = "host offload unspecified"
@@ -169,4 +191,11 @@ def evaluate_moe_decode(
         combined_aggregate_tps=combined_tps,
         per_sequence_tps=per_seq_tps,
         limiting_factor=limiting,
+        model_type="first_order_analytical_bound",
+        is_validated_predictor=False,
+        routing_skew_factor=routing_skew_factor,
+        assumptions_note=(
+            "First-order analytical bound under uniform routing and non-overlapped host transfer; "
+            "not a validated end-to-end performance predictor."
+        ),
     )

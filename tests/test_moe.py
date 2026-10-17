@@ -48,6 +48,41 @@ def test_moe_all_resident_decode():
     assert res.card_aggregate_tps > 0.0
     assert res.combined_aggregate_tps == res.card_aggregate_tps
     assert res.limiting_factor == "on-card memory bandwidth"
+    # Verification of analytical bound status
+    assert res.model_type == "first_order_analytical_bound"
+    assert res.is_validated_predictor is False
+
+
+def test_moe_routing_skew_sensitivity():
+    # Uniform routing
+    res_uniform = evaluate_moe_decode(
+        total_experts=64,
+        resident_experts=64,
+        top_k=2,
+        shared_params_b=8.0,
+        total_params_b=40.0,
+        bits_per_param=4.5,
+        batch_size=8,
+        kv_cache_per_sequence_gb=1.610612736,
+        card_sustained_bw_tb_s=1.4336,
+        routing_skew_factor=1.0,
+    )
+
+    # Skewed routing (e.g. 1.25x load concentration on active experts)
+    res_skewed = evaluate_moe_decode(
+        total_experts=64,
+        resident_experts=64,
+        top_k=2,
+        shared_params_b=8.0,
+        total_params_b=40.0,
+        bits_per_param=4.5,
+        batch_size=8,
+        kv_cache_per_sequence_gb=1.610612736,
+        card_sustained_bw_tb_s=1.4336,
+        routing_skew_factor=1.25,
+    )
+    assert res_skewed.card_weight_traffic_gb > res_uniform.card_weight_traffic_gb
+    assert res_skewed.card_aggregate_tps < res_uniform.card_aggregate_tps
 
 
 def test_moe_host_offloading_and_limits():
@@ -107,4 +142,17 @@ def test_moe_invalid_inputs():
             batch_size=8,
             kv_cache_per_sequence_gb=1.6,
             card_sustained_bw_tb_s=1.4336,
+        )
+    with pytest.raises(ValueError, match="routing_skew_factor"):
+        evaluate_moe_decode(
+            total_experts=64,
+            resident_experts=64,
+            top_k=2,
+            shared_params_b=8.0,
+            total_params_b=40.0,
+            bits_per_param=4.5,
+            batch_size=8,
+            kv_cache_per_sequence_gb=1.6,
+            card_sustained_bw_tb_s=1.4336,
+            routing_skew_factor=0.8,
         )

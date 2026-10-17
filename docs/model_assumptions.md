@@ -1,42 +1,69 @@
 # Model Assumptions and Analytical Formulations
 
-This document formalizes the mathematical equations, hardware simplifications, and analytical assumptions incorporated in the simulation models.
+This document formalizes the mathematical equations, hardware simplifications, and analytical assumptions incorporated in the simulation models for Workstreams A and B.
 
-## 1. Roofline Model Formulations
+---
 
-The ridge point $\text{RP}$ (in FLOPs/Byte) determines whether a kernel is compute-bound or memory-bound:
+## 1. Capacity & Memory Reserve
+- **Physical Memory**: Total installed device capacity in decimal GB ($10^9$ bytes).
+- **Runtime Reserve**: Configurable reserve for driver, OS buffers, and framework context.
+  - Requirement: $\text{runtime\_reserve\_gb} < \text{physical\_memory\_gb}$.
+  - Any configuration where $\text{reserve} \ge \text{physical}$ is strictly invalid and rejected.
+- **Usable Memory**:
+  $$\text{usable\_memory\_gb} = \text{physical\_memory\_gb} - \text{runtime\_reserve\_gb}$$
+- **Model Footprint & Headroom**:
+  $$\text{model\_footprint\_gb} = \text{weights\_gb} + \text{kv\_cache\_total\_gb}$$
+  $$\text{headroom\_gb} = \text{usable\_memory\_gb} - \text{model\_footprint\_gb}$$
+  Fit condition: $\text{headroom\_gb} \ge 0$.
 
-$$\text{RP} = \frac{\text{Peak TFLOPS} \times 10^{12}}{\text{Memory Bandwidth (GB/s)} \times 10^9} = \frac{\text{Peak TFLOPS}}{\text{Memory Bandwidth (GB/s)}} \times 1000$$
+---
 
-For operational intensity $I = \frac{\text{Total FLOPs}}{\text{Total Bytes}}$:
-- If $I < \text{RP}$, the operation is **memory bandwidth bound**.
-- If $I \ge \text{RP}$, the operation is **compute bound**.
+## 2. Prefill Phase Compute (TTFT)
+- First-order dense-equivalent FLOPs for prompt processing:
+  $$F_{\text{TFLOP}} = \frac{2 \times P_{\text{B}} \times S \times B}{1000}$$
+  where $P_{\text{B}}$ is parameter count in billions, $S$ is prompt tokens per sequence, and $B$ is batch size.
+- Required effective compute throughput for a target time-to-first-token (TTFT) budget $T_{\text{budget}}$:
+  $$R_{\text{TFLOP/s}} = \frac{F_{\text{TFLOP}}}{T_{\text{budget}}}$$
+- *Omitted in first-order model*: Quadratic attention FLOPs ($4LS^2D$), logits projection overhead, and padding tokens.
 
-## 2. Prefill Phase (TTFT)
+---
 
-During the prompt processing phase:
-- GEMM compute FLOPs:
-  $$\text{FLOPs}_{\text{GEMM}} \approx 2 \times P_{\text{active}} \times B \times S_{\text{prompt}}$$
-- Attention compute FLOPs:
-  $$\text{FLOPs}_{\text{Attn}} \approx 4 \times L \times B \times S_{\text{prompt}}^2 \times D_{\text{hidden}}$$
-- Weights are read once from HBM into on-chip SRAM/registers.
-- KV Cache is written to HBM for each prompt token:
-  $$\text{Bytes}_{\text{KV\_write}} = 2 \times L \times H_{\text{kv}} \times D_{\text{head}} \times P_{\text{bytes}} \times B \times S_{\text{prompt}}$$
+## 3. Decode Phase Memory Bandwidth Ceilings (TPOT)
+- **Weight Streaming**: Shared model weights are read once per batch step across all concurrent sequences:
+  $$W_{\text{traffic}} = \frac{P_{\text{B}} \times \text{bits\_per\_param}}{8}$$
+- **KV Cache Retrieval**: Each sequence in the batch reads its accumulated context:
+  $$\text{KV}_{\text{batch}} = B \times \text{KV}_{\text{per\_sequence}}$$
+- **Aggregate Decode Throughput Ceiling**:
+  $$T_{\text{aggregate}} = \frac{B \cdot \text{BW}_{\text{sustained}}}{W_{\text{traffic}} + B \cdot \text{KV}_{\text{per\_sequence}}}$$
+  where $\text{BW}_{\text{sustained}} = \text{BW}_{\text{peak}} \times 1000 \times \eta_{\text{bw}}$ in GB/s.
+- **Per-Sequence Throughput**: $T_{\text{per\_seq}} = T_{\text{aggregate}} / B$.
 
-## 3. Decode Phase (TPOT)
+---
 
-For step $t$ in autoregressive generation:
-- Each token step requires reading model weights:
-  $$\text{Bytes}_{\text{weights}} = P_{\text{active}} \times P_{\text{bytes}}$$
-- KV cache must be read for all preceding $S_t$ tokens:
-  $$\text{Bytes}_{\text{KV\_read}} = B \times S_t \times \text{BytesPerToken}$$
-- Compute per step:
-  $$\text{FLOPs}_{\text{step}} \approx 2 \times P_{\text{active}} \times B$$
-- For batch sizes $B < 16$, decode is strictly memory bandwidth bound; as batch size increases, operational intensity scales linearly with $B$ until reaching the ridge point.
+## 4. Mixture-of-Experts (MoE) Modeling Boundaries
 
-## 4. Mixture of Experts (MoE)
+> [!CAUTION]
+> **Analytical First-Order Bound Notice**:
+> The MoE offload model provides an **analytical first-order throughput ceiling**, NOT a validated end-to-end performance predictor. Real systems exhibit routing skew, expert caching/pinning, PCIe DMA framing, and asynchronous compute/transfer pipelining.
 
-- In MoE layers, only $K$ of $N_{\text{experts}}$ are activated per token.
-- Communication overhead for All-to-All collective across $M$ devices:
-  $$\text{Bytes}_{\text{All2All}} = 2 \times \frac{M - 1}{M} \times B \times S \times K \times D_{\text{hidden}} \times P_{\text{bytes}}$$
-- Load Imbalance Multiplier: Real-world routing exhibits token distribution variance among experts, parameterized by default with factor $1.15\times$.
+### Mathematical Formulations:
+- **Expected Unique Experts**: Under uniform independent routing of top-$k$ distinct choices out of $E$ experts across $B$ tokens:
+  $$\mathbb{E}[U] = E \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
+- **Resident vs. Non-Resident Partitioning**:
+  $$\mathbb{E}[U_{\text{res}}] = E_{\text{res}} \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
+  $$\mathbb{E}[U_{\text{nonres}}] = (E - E_{\text{res}}) \times \left[1 - \left(1 - \frac{k}{E}\right)^B\right]$$
+- **Separate Unoverlapped Ceilings**:
+  The combined throughput is evaluated as the serialized minimum of card memory bandwidth and host link throughput:
+  $$T_{\text{combined}} = \min(T_{\text{card}}, T_{\text{host}})$$
+- **Routing Skew Sensitivity**:
+  An optional multiplier $\sigma \ge 1.0$ (`routing_skew_factor`) is supported to model token concentration on popular experts, while recognizing that production-grade prediction requires trace-driven measurements.
+
+---
+
+## 5. Calibration & Provenance Standards
+- **Provisional vs. Verified Data**:
+  All entries in `benchmark_manifest.csv` must carry an explicit `verification_status`:
+  - `provisional`: Literature or vendor-reported metrics where raw profiling traces and exact environment flags have not been independently reproduced locally.
+  - `verified`: Independently audited local benchmark traces with locked clocks, confirmed power limits, and bit-level reproducible environments.
+- **Controlled Baselines**:
+  Simulations must be calibrated against controlled physical GPU baselines (e.g. H100 SXM 80GB) to establish realistic sustained memory efficiency ($\eta_{\text{eff}} \approx 47\% - 50\%$), while acknowledging that calibrating against a GPU does not prove the performance of proposed unbuilt accelerators.
