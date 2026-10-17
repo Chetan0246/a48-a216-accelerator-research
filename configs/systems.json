@@ -1,0 +1,24 @@
+{
+  "A48": {
+    "name": "A48 Base",
+    "description": "Cost-conscious local inference accelerator; single compute die; 48 GB GDDR7; 512-bit @ 28 Gb/s",
+    "memory_capacity_gb": 48.0,
+    "peak_bandwidth_tb_s": 1.792,
+    "memory_bandwidth_gbs": 1792.0,
+    "effective_bandwidth_fraction": 0.8,
+    "runtime_reserve_gb": 4.0,
+    "sram_mib": 160.0,
+    "topology": "single compute die; 48 GB GDDR7; 512-bit @ 28 Gb/s (target assumption)"
+  },
+  "A216": {
+    "name": "A216 Advanced",
+    "description": "Premium high-bandwidth inference accelerator; 3 compute chiplets; 6 x 36 GB HBM4 stacks",
+    "memory_capacity_gb": 216.0,
+    "peak_bandwidth_tb_s": 16.8,
+    "memory_bandwidth_gbs": 16800.0,
+    "effective_bandwidth_fraction": 0.8,
+    "runtime_reserve_gb": 4.0,
+    "sram_mib": 240.0,
+    "topology": "3 compute chiplets; 6 x 36 GB HBM4 stacks; 2 stacks/chiplet (logical target)"
+  }
+}
