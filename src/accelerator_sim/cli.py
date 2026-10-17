@@ -5,14 +5,12 @@ import os
 import sys
 
 try:
-    from .capacity import (
-        calculate_stored_weights_gb,
-        calculate_usable_memory_gb,
-        evaluate_capacity,
-    )
+    from .capacity import evaluate_capacity
     from .decode import calculate_decode_bandwidth_ceiling
     from .kv_cache import (
+        HybridCacheConfig,
         KVCacheShape,
+        calculate_hybrid_cache_breakdown,
         calculate_kv_cache_per_sequence_gb,
     )
     from .models import (
@@ -20,7 +18,7 @@ try:
         load_systems_config,
         load_workloads_config,
     )
-    from .moe import calculate_expected_expert_union, evaluate_moe_decode
+    from .moe import evaluate_moe_decode
     from .prefill import (
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
@@ -29,14 +27,12 @@ except (ImportError, ValueError):
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if pkg_dir not in sys.path:
         sys.path.insert(0, pkg_dir)
-    from accelerator_sim.capacity import (
-        calculate_stored_weights_gb,
-        calculate_usable_memory_gb,
-        evaluate_capacity,
-    )
+    from accelerator_sim.capacity import evaluate_capacity
     from accelerator_sim.decode import calculate_decode_bandwidth_ceiling
     from accelerator_sim.kv_cache import (
+        HybridCacheConfig,
         KVCacheShape,
+        calculate_hybrid_cache_breakdown,
         calculate_kv_cache_per_sequence_gb,
     )
     from accelerator_sim.models import (
@@ -44,7 +40,7 @@ except (ImportError, ValueError):
         load_systems_config,
         load_workloads_config,
     )
-    from accelerator_sim.moe import calculate_expected_expert_union, evaluate_moe_decode
+    from accelerator_sim.moe import evaluate_moe_decode
     from accelerator_sim.prefill import (
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
@@ -184,9 +180,33 @@ def main(argv=None):
     is_hybrid = "hybrid" in attention_type.lower() or attention_type.lower() in ("linear_attention", "gated_deltanet")
 
     if is_hybrid:
-        stored_weights_gb = calculate_stored_weights_gb(params_b, bits_per_param)
-        usable_mem_gb = calculate_usable_memory_gb(physical_mem_gb, runtime_reserve)
-        headroom_weights = usable_mem_gb - stored_weights_gb
+        ha = wl.hybrid_attention if (args.workload and wl is not None and wl.hybrid_attention) else {}
+        hybrid_cfg = HybridCacheConfig(
+            total_layers=layers,
+            gated_attention_layers=ha.get("gated_attention_layers", 10),
+            gated_deltanet_layers=ha.get("linear_attention_layers", 30),
+            attn_kv_heads=kv_heads,
+            attn_head_dim=head_dim,
+            attn_precision_bits=args.kv_bits,
+            attn_overhead_percent=args.kv_overhead_percent,
+            linear_key_heads=ha.get("linear_key_heads", 16),
+            linear_key_head_dim=ha.get("linear_key_head_dim", 128),
+            linear_value_heads=ha.get("linear_value_heads", 32),
+            linear_value_head_dim=ha.get("linear_value_head_dim", 128),
+            linear_state_precision_bits=ha.get("linear_state_precision_bits", 32.0),
+            conv_kernel_size=ha.get("conv_kernel_size", 4),
+            conv_channels=ha.get("conv_channels", 8192),
+            conv_precision_bits=ha.get("conv_precision_bits", 16.0),
+        )
+        h_breakdown = calculate_hybrid_cache_breakdown(hybrid_cfg, args.context, args.batch)
+
+        cap_eval = evaluate_capacity(
+            physical_memory_gb=physical_mem_gb,
+            params_b=params_b,
+            kv_cache_gb=h_breakdown.total_state_batch_gb,
+            bits_per_param=bits_per_param,
+            runtime_reserve_gb=runtime_reserve,
+        )
 
         print("=" * 70)
         print(f" ACCELERATOR SIMULATOR: {sys_cfg.name}")
@@ -194,25 +214,63 @@ def main(argv=None):
         print(f" Memory: {physical_mem_gb:.1f} GB | Peak BW: {peak_bw_tb_s:.3f} TB/s | Sustained: {sustained_bw_tb_s:.3f} TB/s ({eff_bw_frac:.0%})")
         print("=" * 70)
 
-        print(f"\n[1] MEMORY CAPACITY EVALUATION (MoE {params_b:.1f}B - Hybrid Attention)")
-        print(f"  - Stored Weights:       {stored_weights_gb:.3f} GB ({bits_per_param:.2f} bits/param)")
-        print("  - KV Cache per sequence:DEFERRED (Hybrid attention: 30 Gated DeltaNet + 10 Gated Attention layers)")
-        print("  - Total Batch KV:       DEFERRED")
-        print(f"  - Model Footprint:      DEFERRED (Weights-only: {stored_weights_gb:.3f} GB)")
-        print(f"  - Runtime Reserve:      {runtime_reserve:.2f} GB")
-        print(f"  - Physical Memory:      {physical_mem_gb:.1f} GB")
-        print(f"  - Usable Memory:        {usable_mem_gb:.3f} GB")
-        print(f"  - Usable Headroom:      DEFERRED (Weights headroom: {headroom_weights:.3f} GB)")
-        print(f"  - Capacity Status:      {'WEIGHTS FIT IN MEMORY (Full footprint deferred)' if headroom_weights >= 0 else 'DOES NOT FIT (Weights exceed memory)'}")
+        print(f"\n[1] MEMORY CAPACITY EVALUATION (MoE {params_b:.1f}B - Hybrid Attention Breakdown)")
+        print(f"  - Stored Weights:       {cap_eval.weights_gb:.3f} GB ({bits_per_param:.2f} bits/param)")
+        print(f"  - Persistent State Breakdown (Batch: {args.batch}, Context: {args.context:,}):")
+        print(f"    * Gated Attention KV ({hybrid_cfg.gated_attention_layers} layers, {hybrid_cfg.attn_precision_bits:g}-bit):   {h_breakdown.attn_kv_gb_per_seq:.3f} GB/seq ({h_breakdown.attn_kv_batch_gb:.3f} GB batch)")
+        print(f"    * Gated DeltaNet State ({hybrid_cfg.gated_deltanet_layers} layers, {hybrid_cfg.linear_state_precision_bits:g}-bit): {h_breakdown.recurrent_state_gb_per_seq:.3f} GB/seq ({h_breakdown.recurrent_state_batch_gb:.3f} GB batch)")
+        print(f"    * Causal Conv1D State ({hybrid_cfg.gated_deltanet_layers} layers, {hybrid_cfg.conv_precision_bits:g}-bit):  {h_breakdown.conv_state_gb_per_seq:.3f} GB/seq ({h_breakdown.conv_state_batch_gb:.3f} GB batch)")
+        print(f"    * Total Persistent State:                     {h_breakdown.total_state_gb_per_seq:.3f} GB/seq ({h_breakdown.total_state_batch_gb:.3f} GB batch)")
+        print(f"  - Model Footprint:      {cap_eval.model_footprint_gb:.3f} GB (Weights + Persistent State)")
+        print(f"  - Runtime Reserve:      {cap_eval.runtime_reserve_gb:.2f} GB")
+        print(f"  - Physical Memory:      {cap_eval.physical_memory_gb:.1f} GB")
+        print(f"  - Usable Memory:        {cap_eval.usable_memory_gb:.3f} GB")
+        print(f"  - Usable Headroom:      {cap_eval.headroom_gb:.3f} GB")
+        print(f"  - Capacity Status:      {'FITS IN ACCELERATOR MEMORY' if cap_eval.fits_in_memory else 'DOES NOT FIT (OOM)'}")
 
-        union_res = calculate_expected_expert_union(experts, top_k, args.batch)
+        resident = experts if args.resident_experts is None else args.resident_experts
+        moe_res = evaluate_moe_decode(
+            total_experts=experts,
+            resident_experts=resident,
+            top_k=top_k,
+            shared_params_b=shared_params_b,
+            total_params_b=params_b,
+            bits_per_param=bits_per_param,
+            batch_size=args.batch,
+            kv_cache_per_sequence_gb=h_breakdown.total_state_gb_per_seq,
+            card_sustained_bw_tb_s=sustained_bw_tb_s,
+            host_bw_tb_s=args.host_expert_bandwidth_tb_s,
+            host_latency_ms=args.host_expert_latency_ms,
+            offload_mode=args.offload_mode,
+            step_cache_traffic_gb=h_breakdown.total_step_cache_traffic_gb,
+        )
+
         print(f"\n[2] MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE {params_b:.1f}B)")
         print(f"  - Routed Experts:       {experts} total, top-{top_k} active/token")
-        print(f"  - Resident Experts:     {experts} / {experts} on-chip")
-        print(f"  - Expected Batch Union: {union_res:.4f} unique experts")
+        print(f"  - Resident Experts:     {resident} / {experts} on-chip")
+        print(f"  - Expected Batch Union: {moe_res.expected_total_union:.4f} unique experts")
+        print(f"  - Expected Resident:    {moe_res.expected_resident_union:.4f} unique experts")
+        print(f"  - Expected Nonresident: {moe_res.expected_nonresident_union:.4f} unique experts")
 
-        print("\n[3] DECODE THROUGHPUT CEILING (MoE)")
-        print("  - Decode Ceilings:      DEFERRED (Cannot project throughput without modeled cache traffic)")
+        print("\n[3] DECODE THROUGHPUT CEILING (MoE - Hybrid Cache Traffic)")
+        print(f"  - Card Weight Traffic:  {moe_res.card_weight_traffic_gb:.3f} GB/step ({moe_res.card_step_time_ms:.2f} ms)")
+        print("  - Cache Step Traffic Breakdown:")
+        print(f"    * Attention KV Read:   {h_breakdown.step_attn_kv_read_gb:.3f} GB/step (O(S) context history)")
+        print(f"    * Attention KV Write:  {h_breakdown.step_attn_kv_write_gb:.4f} GB/step (new token KV)")
+        print(f"    * Recurrent State:     {h_breakdown.step_recurrent_state_traffic_gb:.3f} GB/step (read S_{{t-1}} + write S_t)")
+        print(f"    * Conv1D State:        {h_breakdown.step_conv_state_traffic_gb:.4f} GB/step (read + write shifted buffer)")
+        print(f"    * Total Card Cache:    {moe_res.card_cache_traffic_gb:.3f} GB/step")
+        if resident < experts:
+            print(f"  - Host Weight Traffic:  {moe_res.host_weight_traffic_gb:.3f} GB/step ({moe_res.host_step_time_ms:.2f} ms)")
+        print(f"  - Card Aggregate TPS:   {moe_res.card_aggregate_tps:.2f} tokens/s")
+        if resident < experts and args.host_expert_bandwidth_tb_s == 0.0:
+            print("  - Host Aggregate TPS:   NOT COMPUTED (supply --host-expert-bandwidth-tb-s)")
+        elif resident < experts:
+            print(f"  - Host Aggregate TPS:   {moe_res.host_aggregate_tps:.2f} tokens/s")
+        print(f"  - Serialized Bound TPS: {moe_res.serialized_aggregate_tps:.2f} tokens/s")
+        print(f"  - Overlapped Bound TPS: {moe_res.overlapped_aggregate_tps:.2f} tokens/s")
+        print(f"  - Selected Bound ({moe_res.offload_mode}): {moe_res.combined_aggregate_tps:.2f} tokens/s ({moe_res.per_sequence_tps:.2f} tok/s/seq)")
+        print(f"  - Primary Limiter:      {moe_res.limiting_factor}")
 
         active_params = wl.active_parameters_b if (args.workload and wl is not None) else (shared_params_b + top_k * (routed_params_b / float(experts)))
         prefill_tflop = calculate_prefill_tflop(active_params, args.prompt_tokens, args.batch)

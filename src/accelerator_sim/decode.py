@@ -16,6 +16,7 @@ class DecodeCeiling:
     aggregate_tps: float
     per_sequence_tps: float
     limiting_factor: str
+    card_cache_traffic_gb: float = 0.0
 
 
 def calculate_decode_bandwidth_ceiling(
@@ -24,6 +25,7 @@ def calculate_decode_bandwidth_ceiling(
     weight_traffic_gb: float,
     kv_cache_per_sequence_gb: float,
     batch_size: int,
+    step_cache_traffic_gb: float | None = None,
 ) -> DecodeCeiling:
     """Calculates decode memory-bandwidth throughput ceilings.
 
@@ -63,12 +65,17 @@ def calculate_decode_bandwidth_ceiling(
         raise ValueError("effective_bandwidth_fraction must be in (0, 1.0]")
     if weight_traffic_gb < 0 or kv_cache_per_sequence_gb < 0:
         raise ValueError("weight_traffic_gb and kv_cache_per_sequence_gb cannot be negative")
+    if step_cache_traffic_gb is not None and (
+        not math.isfinite(step_cache_traffic_gb) or step_cache_traffic_gb < 0
+    ):
+        raise ValueError("step_cache_traffic_gb must be a non-negative finite number")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
 
     sustained_bw_gb_s = peak_bandwidth_tb_s * 1000.0 * effective_bandwidth_fraction
     kv_batch_gb = kv_cache_per_sequence_gb * batch_size
-    step_traffic_gb = weight_traffic_gb + kv_batch_gb
+    card_cache_traffic_gb = step_cache_traffic_gb if step_cache_traffic_gb is not None else kv_batch_gb
+    step_traffic_gb = weight_traffic_gb + card_cache_traffic_gb
 
     if step_traffic_gb <= 0:
         return DecodeCeiling(
@@ -80,6 +87,7 @@ def calculate_decode_bandwidth_ceiling(
             aggregate_tps=math.inf,
             per_sequence_tps=math.inf,
             limiting_factor="zero traffic",
+            card_cache_traffic_gb=0.0,
         )
 
     aggregate_tps = (sustained_bw_gb_s * batch_size) / step_traffic_gb
@@ -94,4 +102,5 @@ def calculate_decode_bandwidth_ceiling(
         aggregate_tps=aggregate_tps,
         per_sequence_tps=per_seq_tps,
         limiting_factor="on-card memory bandwidth",
+        card_cache_traffic_gb=card_cache_traffic_gb,
     )

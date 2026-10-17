@@ -242,3 +242,24 @@ def test_moe_invalid_inputs():
         )
 
 
+def test_evaluate_moe_decode_with_explicit_cache_traffic():
+    """evaluate_moe_decode correctly uses step_cache_traffic_gb when provided."""
+    res = evaluate_moe_decode(
+        total_experts=64,
+        resident_experts=64,
+        top_k=2,
+        shared_params_b=8.0,
+        total_params_b=40.0,
+        bits_per_param=4.5,
+        batch_size=4,
+        kv_cache_per_sequence_gb=0.0,
+        card_sustained_bw_tb_s=1.0,
+        step_cache_traffic_gb=1.5,
+    )
+    # card_cache_traffic_gb should be 1.5 GB
+    assert pytest.approx(res.card_cache_traffic_gb, rel=1e-5) == 1.5
+    # Total card step traffic = weight_traffic + 1.5
+    assert pytest.approx(res.card_weight_traffic_gb + 1.5, rel=1e-5) == (res.card_weight_traffic_gb + res.card_cache_traffic_gb)
+
+
+

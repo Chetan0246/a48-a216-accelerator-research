@@ -17,7 +17,9 @@ from accelerator_sim.capacity import (
 )
 from accelerator_sim.decode import calculate_decode_bandwidth_ceiling
 from accelerator_sim.kv_cache import (
+    HybridCacheConfig,
     KVCacheShape,
+    calculate_hybrid_cache_breakdown,
     calculate_kv_cache_per_sequence_gb,
 )
 from accelerator_sim.models import (
@@ -64,7 +66,9 @@ def main():
             weights_fit = weights_gb <= usable_mem_gb
             context_len = wl.default_context_len
 
-            is_cache_supported = wl.is_complete and attention_type in ("mha", "gqa", "mqa")
+            is_hybrid = "hybrid" in attention_type or attention_type in ("linear_attention", "gated_deltanet")
+            is_standard = attention_type in ("mha", "gqa", "mqa")
+            is_cache_supported = wl.is_complete and (is_standard or is_hybrid)
 
             if not is_cache_supported:
                 if wl_name not in notified_workloads:
@@ -82,6 +86,9 @@ def main():
                         "batch_size": b,
                         "weights_gb": weights_gb,
                         "kv_cache_gb": "deferred",
+                        "gated_attn_kv_gb": "deferred",
+                        "recurrent_state_gb": "deferred",
+                        "conv_state_gb": "deferred",
                         "model_footprint_gb": "deferred",
                         "usable_memory_gb": usable_mem_gb,
                         "headroom_gb": "deferred",
@@ -96,6 +103,8 @@ def main():
                         "batch_size": b,
                         "expected_active_experts": "deferred",
                         "card_weight_traffic_gb": "deferred",
+                        "card_cache_traffic_gb": "deferred",
+                        "total_step_traffic_gb": "deferred",
                         "aggregate_tps": "deferred",
                         "serialized_aggregate_tps": "deferred",
                         "overlapped_aggregate_tps": "deferred",
@@ -115,6 +124,93 @@ def main():
                         "prefill_tflop": round(p_tflop, 3),
                         "required_throughput_3s_tflops": round(req_tflops, 1),
                         "prefill_status": "first_order_estimate",
+                    })
+                continue
+
+            if is_hybrid:
+                ha = wl.hybrid_attention or {}
+                hybrid_cfg = HybridCacheConfig(
+                    total_layers=wl.num_layers,
+                    gated_attention_layers=ha.get("gated_attention_layers", 10),
+                    gated_deltanet_layers=ha.get("linear_attention_layers", 30),
+                    attn_kv_heads=wl.num_kv_heads,
+                    attn_head_dim=wl.head_dim,
+                    attn_precision_bits=16.0,
+                    linear_key_heads=ha.get("linear_key_heads", 16),
+                    linear_key_head_dim=ha.get("linear_key_head_dim", 128),
+                    linear_value_heads=ha.get("linear_value_heads", 32),
+                    linear_value_head_dim=ha.get("linear_value_head_dim", 128),
+                    linear_state_precision_bits=ha.get("linear_state_precision_bits", 32.0),
+                    conv_kernel_size=ha.get("conv_kernel_size", 4),
+                    conv_channels=ha.get("conv_channels", 8192),
+                    conv_precision_bits=ha.get("conv_precision_bits", 16.0),
+                )
+                for b in batch_sizes:
+                    h_breakdown = calculate_hybrid_cache_breakdown(hybrid_cfg, context_len, b)
+                    cap_res = evaluate_capacity(
+                        physical_memory_gb=physical_mem_gb,
+                        params_b=params_b,
+                        kv_cache_gb=h_breakdown.total_state_batch_gb,
+                        bits_per_param=bits_per_param,
+                        runtime_reserve_gb=runtime_reserve_gb,
+                    )
+                    capacity_records.append({
+                        "system": sys_name,
+                        "workload": wl_name,
+                        "batch_size": b,
+                        "weights_gb": round(cap_res.weights_gb, 3),
+                        "kv_cache_gb": round(cap_res.kv_cache_gb, 3),
+                        "gated_attn_kv_gb": round(h_breakdown.attn_kv_batch_gb, 3),
+                        "recurrent_state_gb": round(h_breakdown.recurrent_state_batch_gb, 3),
+                        "conv_state_gb": round(h_breakdown.conv_state_batch_gb, 3),
+                        "model_footprint_gb": round(cap_res.model_footprint_gb, 3),
+                        "usable_memory_gb": round(cap_res.usable_memory_gb, 3),
+                        "headroom_gb": round(cap_res.headroom_gb, 3),
+                        "fits_in_memory": cap_res.fits_in_memory,
+                        "cache_status": "supported_hybrid_modeled",
+                    })
+
+                    # Prefill
+                    active_params_b = wl.active_parameters_b
+                    p_tflop = calculate_prefill_tflop(active_params_b, context_len, b)
+                    req_tflops = calculate_required_prefill_throughput(p_tflop, target_ttft_seconds=3.0)
+                    prefill_records.append({
+                        "system": sys_name,
+                        "workload": wl_name,
+                        "batch_size": b,
+                        "context_len": context_len,
+                        "prefill_tflop": round(p_tflop, 3),
+                        "required_throughput_3s_tflops": round(req_tflops, 1),
+                        "prefill_status": "first_order_estimate",
+                    })
+
+                    # Decode (Qwen is MoE)
+                    moe_res = evaluate_moe_decode(
+                        total_experts=wl.num_experts,
+                        resident_experts=wl.num_experts,
+                        top_k=wl.experts_per_token,
+                        shared_params_b=wl.shared_params_b if wl.shared_params_b is not None else 0.0,
+                        total_params_b=params_b,
+                        bits_per_param=bits_per_param,
+                        batch_size=b,
+                        kv_cache_per_sequence_gb=h_breakdown.total_state_gb_per_seq,
+                        card_sustained_bw_tb_s=peak_bw_tb_s * eff_bw_fraction,
+                        offload_mode="serialized",
+                        step_cache_traffic_gb=h_breakdown.total_step_cache_traffic_gb,
+                    )
+                    decode_records.append({
+                        "system": sys_name,
+                        "workload": wl_name,
+                        "batch_size": b,
+                        "expected_active_experts": round(moe_res.expected_total_union, 4),
+                        "card_weight_traffic_gb": round(moe_res.card_weight_traffic_gb, 3),
+                        "card_cache_traffic_gb": round(moe_res.card_cache_traffic_gb, 3),
+                        "total_step_traffic_gb": round(moe_res.card_weight_traffic_gb + moe_res.card_cache_traffic_gb, 3),
+                        "aggregate_tps": round(moe_res.combined_aggregate_tps, 2),
+                        "serialized_aggregate_tps": round(moe_res.serialized_aggregate_tps, 2),
+                        "overlapped_aggregate_tps": round(moe_res.overlapped_aggregate_tps, 2),
+                        "per_sequence_tps": round(moe_res.per_sequence_tps, 2),
+                        "decode_status": "supported_hybrid_modeled",
                     })
                 continue
 
@@ -152,6 +248,9 @@ def main():
                     "batch_size": b,
                     "weights_gb": round(cap_res.weights_gb, 3),
                     "kv_cache_gb": round(cap_res.kv_cache_gb, 3),
+                    "gated_attn_kv_gb": round(cap_res.kv_cache_gb, 3),
+                    "recurrent_state_gb": 0.0,
+                    "conv_state_gb": 0.0,
                     "model_footprint_gb": round(cap_res.model_footprint_gb, 3),
                     "usable_memory_gb": round(cap_res.usable_memory_gb, 3),
                     "headroom_gb": round(cap_res.headroom_gb, 3),
@@ -193,6 +292,8 @@ def main():
                         "batch_size": b,
                         "expected_active_experts": round(moe_res.expected_total_union, 4),
                         "card_weight_traffic_gb": round(moe_res.card_weight_traffic_gb, 3),
+                        "card_cache_traffic_gb": round(moe_res.card_cache_traffic_gb, 3),
+                        "total_step_traffic_gb": round(moe_res.card_weight_traffic_gb + moe_res.card_cache_traffic_gb, 3),
                         "aggregate_tps": round(moe_res.combined_aggregate_tps, 2),
                         "serialized_aggregate_tps": round(moe_res.serialized_aggregate_tps, 2),
                         "overlapped_aggregate_tps": round(moe_res.overlapped_aggregate_tps, 2),
@@ -213,6 +314,8 @@ def main():
                         "batch_size": b,
                         "expected_active_experts": 1.0,
                         "card_weight_traffic_gb": round(dec_res.weight_traffic_gb, 3),
+                        "card_cache_traffic_gb": round(dec_res.card_cache_traffic_gb, 3),
+                        "total_step_traffic_gb": round(dec_res.total_step_traffic_gb, 3),
                         "aggregate_tps": round(dec_res.aggregate_tps, 2),
                         "serialized_aggregate_tps": round(dec_res.aggregate_tps, 2),
                         "overlapped_aggregate_tps": round(dec_res.aggregate_tps, 2),

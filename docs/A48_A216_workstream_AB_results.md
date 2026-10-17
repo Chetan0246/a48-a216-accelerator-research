@@ -65,9 +65,10 @@ Sources for these references include the [RTX 5090 specification page](https://w
 
 - Capacity accounting with effective weight bits/parameter, KV precision, batch, and runtime reserve.
 - Standard K/V cache formula in decimal GB.
+- Hybrid linear-attention and gated-attention dual cache modeling (Qwen3.6-35B-A3B: 30 Gated DeltaNet recurrent state + 10 standard gated-attention KV layers + 1D causal convolution state).
 - Dense weight-streaming decode roofline.
-- MoE expected distinct-expert union across a batch under uniform independent top-k routing.
-- Device-resident experts versus host-offloaded experts, with user-supplied host bandwidth and latency assumptions.
+- MoE expected distinct-expert union across a batch under uniform independent top-k routing and explicit marginal inclusion probability distributions.
+- Device-resident experts versus host-offloaded experts, with user-supplied host bandwidth and latency assumptions, reporting both serialized and overlapped execution bounds.
 - Prefill FLOP estimate and required effective TFLOP/s for a target time-to-first-token budget.
 - Optional precision-specific compute peaks and compute-utilization assumption.
 - Context and bandwidth sweep.
@@ -86,13 +87,17 @@ python accelerator_roofline.py --system a48 --params-b 32 --bits-per-param 4.5 -
 
 # MoE: 120B total, 2B shared, 64 experts, top-4, batch 8, 16 experts resident
 python accelerator_roofline.py --system a48 --model moe --params-b 120 --shared-params-b 2 --bits-per-param 4.5 --experts 64 --top-k 4 --batch 8 --resident-experts 16 --host-expert-bandwidth-tb-s 0.025 --host-expert-latency-ms 0.05
+
+# Qwen3.6-35B-A3B Hybrid Attention Preset
+python -m accelerator_sim.cli --system A48 --workload qwen-3.6-35b-a3b --batch 4
 ```
 
 ## 6. Explicitly not yet modeled
 
-- MLA, sliding-window, and SSM/hybrid KV/state formulas: need architecture-specific shape parameters rather than a fake generic multiplier.
+- Multi-Head Latent Attention (MLA, e.g. DeepSeek-V2/V3): low-rank compressed latent KV cache and decoupled RoPE keys remain strictly deferred (`UnsupportedAttentionTypeError`).
 - Speculative decoding: needs draft-model traffic, acceptance length, verification cost, and separate prefill/decode measurements.
 - Multi-card scaling: needs interconnect bandwidth/latency, parallelization strategy, and measured scaling efficiency.
 - Thermal/power derating, process node, die area, HBM4 package feasibility, packaging allocation, and BOM: deliberately deferred until workload/model results justify moving into later workstreams.
 
 The simulator does not use thermal as an independent `min()` throughput ceiling. Power/thermal effects should derate sustained clock and bandwidth through measured or explicitly assumed curves.
+

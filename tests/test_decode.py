@@ -94,3 +94,23 @@ def test_decode_invalid_inputs():
             batch_size=1,
         )
 
+
+def test_decode_with_explicit_cache_traffic():
+    """calculate_decode_bandwidth_ceiling correctly uses step_cache_traffic_gb when provided."""
+    # Weight traffic = 10.0 GB, explicit step cache traffic = 2.5 GB, batch 2
+    res = calculate_decode_bandwidth_ceiling(
+        peak_bandwidth_tb_s=1.0,
+        effective_bandwidth_fraction=1.0,
+        weight_traffic_gb=10.0,
+        kv_cache_per_sequence_gb=0.0,
+        batch_size=2,
+        step_cache_traffic_gb=2.5,
+    )
+    # Sustained BW = 1000 GB/s. Total step traffic = 10.0 + 2.5 = 12.5 GB.
+    assert pytest.approx(res.total_step_traffic_gb, rel=1e-5) == 12.5
+    assert pytest.approx(res.card_cache_traffic_gb, rel=1e-5) == 2.5
+    # Aggregate TPS = (1000 * 2) / 12.5 = 160.0
+    assert pytest.approx(res.aggregate_tps, rel=1e-5) == 160.0
+    assert pytest.approx(res.per_sequence_tps, rel=1e-5) == 80.0
+
+

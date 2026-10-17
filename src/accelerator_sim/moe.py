@@ -119,6 +119,7 @@ class MoEOffloadResult:
     per_sequence_tps: float
     offload_mode: str
     limiting_factor: str
+    card_cache_traffic_gb: float = 0.0
     model_type: str = "first_order_analytical_bound"
     is_validated_predictor: bool = False
     assumptions_note: str = (
@@ -141,6 +142,7 @@ def evaluate_moe_decode(
     host_latency_ms: float = 0.0,
     expert_inclusion_probs: list[float] | None = None,
     offload_mode: str = "serialized",
+    step_cache_traffic_gb: float | None = None,
 ) -> MoEOffloadResult:
     """Evaluates MoE decode throughput ceiling with on-card and host offloading.
 
@@ -198,6 +200,10 @@ def evaluate_moe_decode(
         raise ValueError("host_bw_tb_s and host_latency_ms cannot be negative")
     if kv_cache_per_sequence_gb < 0:
         raise ValueError("kv_cache_per_sequence_gb cannot be negative")
+    if step_cache_traffic_gb is not None and (
+        not math.isfinite(step_cache_traffic_gb) or step_cache_traffic_gb < 0
+    ):
+        raise ValueError("step_cache_traffic_gb must be a non-negative finite number")
     valid_modes = ("serialized", "overlapped")
     if offload_mode not in valid_modes:
         raise ValueError(f"offload_mode must be one of {valid_modes}, got '{offload_mode}'")
@@ -235,7 +241,10 @@ def evaluate_moe_decode(
     # On-card memory traffic & step time
     card_active_params_b = shared_params_b + expected_resident_union * expert_b
     card_weight_traffic_gb = calculate_stored_weights_gb(card_active_params_b, bits_per_param)
-    card_step_traffic_gb = card_weight_traffic_gb + kv_cache_per_sequence_gb * batch_size
+    card_cache_traffic_gb = (
+        step_cache_traffic_gb if step_cache_traffic_gb is not None else (kv_cache_per_sequence_gb * batch_size)
+    )
+    card_step_traffic_gb = card_weight_traffic_gb + card_cache_traffic_gb
     card_sustained_bw_gb_s = card_sustained_bw_tb_s * 1000.0
     card_step_time_s = card_step_traffic_gb / card_sustained_bw_gb_s if card_sustained_bw_gb_s > 0 else math.inf
     card_tps = batch_size / card_step_time_s if card_step_time_s > 0 else 0.0
@@ -304,6 +313,7 @@ def evaluate_moe_decode(
         per_sequence_tps=per_seq_tps,
         offload_mode=offload_mode,
         limiting_factor=limiting,
+        card_cache_traffic_gb=card_cache_traffic_gb,
         model_type="first_order_analytical_bound",
         is_validated_predictor=False,
         assumptions_note=(

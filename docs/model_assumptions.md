@@ -31,11 +31,30 @@ This document formalizes the mathematical equations, hardware simplifications, a
     MLA (e.g., DeepSeek-V2/V3) compresses key-value representations into low-rank latent vectors and decouples RoPE keys. Applying standard GQA/MHA formulas to MLA workloads is invalid and strictly deferred via `UnsupportedAttentionTypeError`.
   - **Hybrid Linear Attention & Gated Attention (Qwen3.6-35B-A3B)**:
     Qwen3.6-35B-A3B employs a repeating hybrid pattern: $10 \times \big[3 \times (\text{Gated DeltaNet linear attention}) + 1 \times (\text{Gated Attention})\big]$ across its 40 layers.
-    - 30 layers utilize **Gated DeltaNet** linear attention with a fixed-size recurrent state $O(1)$ independent of context length $S$.
-    - 10 layers utilize standard **Gated Attention** with KV heads whose cache grows linearly $O(S)$ with context length $S$.
-    - Applying a 40-layer standard GQA formula to Qwen is physically incorrect (it overstates context-dependent KV cache size and memory traffic by $4\times$ on the linear layers).
-    - Cache capacity and decode bandwidth projections are strictly deferred via `UnsupportedAttentionTypeError` until dual recurrent-state and standard KV-cache modeling is implemented.
-    - Parameter-storage calculations ($19.688\text{ GB}$ weights at 4.5 bits) do not depend on attention cache architecture and remain fully supported.
+    - **Standard Gated Attention (10 layers)**:
+      - 2 KV heads, head dimension 256, FP16 precision ($P_{\text{attn}} = 16.0$ bits).
+      - Bytes per token across 10 layers: $2 \times 10 \times 2 \times 256 \times (16/8) = 20,480\text{ bytes/token}$.
+      - For context length $S = 8,192$: $8,192 \times 20,480 = 167,772,160\text{ bytes} = 0.16777\text{ decimal GB} \approx \mathbf{0.168\text{ GB}}$ per sequence.
+      - **Context scaling**: Grows strictly linearly $O(S)$ with context length $S$.
+      - **Decode memory traffic**: In each decode step, reading accumulated context history requires $B \times \text{KV}_{\text{seq}}(S)$ bytes read traffic ($O(S)$), plus $B \times 20,480$ bytes write traffic to append the new token's KV.
+    - **Gated DeltaNet Linear Attention (30 layers)**:
+      - **Recurrent State Matrix**: Each linear layer maintains a persistent recurrent state matrix $S_h \in \mathbb{R}^{d_k \times d_v}$ per value head, where $d_k = 128$, $d_v = 128$, and $H_v = 32$ value heads.
+      - State elements per layer: $32 \times 128 \times 128 = 524,288$ elements.
+      - Total recurrent elements across 30 layers: $30 \times 524,288 = 15,728,640$ elements per sequence.
+      - State precision: FP32 ($P_{\text{state}} = 32.0$ bits = 4 bytes/elem, matching published `mamba_ssm_dtype: float32` required for numerical stability in the delta rule update).
+      - Recurrent state capacity per sequence: $15,728,640 \times 4 = 62,914,560\text{ bytes} \approx \mathbf{0.0629\text{ decimal GB}}$.
+      - Configurable precision: FP16 ($16.0$ bits) yields $31,457,280\text{ bytes} \approx 0.0315\text{ decimal GB}$.
+      - **Causal 1D Convolution State**: Short depthwise causal convolution (kernel size $K = 4$, holding $K-1 = 3$ history tokens) across $\text{conv\_dim} = 2 \times (16 \times 128) + (32 \times 128) = 8,192$ channels.
+      - Conv state elements across 30 layers: $30 \times 3 \times 8,192 = 737,280$ elements per sequence.
+      - At baseline FP16 precision ($P_{\text{conv}} = 16.0$ bits = 2 bytes/elem): $737,280 \times 2 = 1,474,560\text{ bytes} \approx \mathbf{0.00147\text{ decimal GB}}$.
+      - **Context scaling**: Both recurrent state and conv state are strictly independent of context length $S$ ($O(1)$ w.r.t. $S$), but scale linearly with batch size $B$.
+      - **Decode memory traffic**: Each decode step updates the recurrent state ($S_t = S_{t-1}(I - \beta_t k_t k_t^T) + v_t k_t^T$), requiring **1 full read** of $S_{t-1}$ and **1 full write** of $S_t$ ($2 \times B \times \text{recurrent\_state\_bytes} = 2 \times B \times 0.0629\text{ GB}$). Similarly, updating the 1D convolution rolling buffer requires reading the past 3 tokens and writing the shifted buffer ($2 \times B \times \text{conv\_state\_bytes} = 2 \times B \times 0.00147\text{ GB}$).
+    - **Total Persistent Inference State**:
+      At $S = 8,192$, FP16 attention, FP32 recurrent state, FP16 conv state (batch $B = 1$):
+      $$\text{State}_{\text{total}} = 0.16777 + 0.06291 + 0.00147 = \mathbf{0.23216\text{ decimal GB}}$$
+    - **Published vs. Simulator Assumptions**:
+      - *Published configuration parameters*: 10 full attention layers, 30 linear attention layers, 2 KV heads (dim 256), 16 linear key heads (dim 128), 32 linear value heads (dim 128), conv kernel size 4, `mamba_ssm_dtype: float32`, conv channels 8,192.
+      - *Simulator assumptions*: Conv state precision baseline FP16 (configurable), allocation overhead baseline 0.0%, 1 read + 1 write per decode step for state matrices and conv buffers.
 
 ---
 
@@ -73,8 +92,21 @@ This document formalizes the mathematical equations, hardware simplifications, a
   where $P_{\text{shared}}$ includes embeddings, self-attention, layer norms, and router gating matrices.
 - Individual expert size: $P_{\text{expert}} = P_{\text{routed}} / E$.
 - Active parameters per token: $P_{\text{active}} = P_{\text{shared}} + k \times P_{\text{expert}}$.
-- **Enforced Workload Accounting & Reference Values**:
-  - **Qwen 3.6 35B A3B**: $P_{\text{total}} = 35.0\text{B}$, $P_{\text{shared}} = 2.8\text{B}$, $P_{\text{routed}} = 32.2\text{B}$, $E = 256$, $k = 8$. Per expert: $32.2 / 256 = 0.12578\text{B}$. Active parameters per token: $2.8 + 8 \times 0.12578 = 3.80625\text{B} \approx 3.81\text{B}$ (hence A3B designation).
+  - **Qwen 3.6 35B A3B Parameter Accounting Reconciliation**:
+    - **Total parameters**: $35.0\text{B}$.
+    - **Routed expert parameters**: 40 layers $\times 256$ experts $\times (3 \times 2048 \times 512) = 32,212,254,720$ parameters ($\mathbf{32.21\text{B}} \approx 32.2\text{B}$).
+    - **Per-expert size**: $3 \times 2048 \times 512 = 3,145,728$ parameters ($0.00315\text{B}$).
+    - **Active routed parameters per token** (top-8): $40 \times 8 \times 3,145,728 = 1,006,632,960$ parameters ($\mathbf{1.01\text{B}}$).
+    - **Shared / non-routed parameter pool**: Total weights stored on device must house all $35.0\text{B}$ parameters. The non-routed pool is $35.0 - 32.21 = \mathbf{2.79\text{B}} \approx \mathbf{2.8\text{B}}$, composed of:
+      1. Text backbone shared layers (10 full attention + 30 linear attention + 40 shared experts + routers): $\mathbf{1.43\text{B}}$.
+      2. Input embedding table ($248,320 \times 2048$): $\mathbf{0.51\text{B}}$.
+      3. Output LM head (`tie_word_embeddings: false`, $248,320 \times 2048$): $\mathbf{0.51\text{B}}$.
+      4. Vision encoder tower (depth 27, hidden size 1152, intermediate 4304) included in multimodal conditional generation weights: $\mathbf{\approx 0.41\text{B}}$.
+    - **Reconciling Conventions**:
+      - **Simulator on-card active parameters**: In the simulator's strict parameter accounting, all resident non-routed weights ($2.8\text{B}$) remain in memory and are accounted as shared baseline parameters, yielding $P_{\text{active}} = 2.8 + 8 \times (32.2 / 256) = \mathbf{3.81\text{B}}$.
+      - **Published Model Card ("A3B") Designation**: In open-weights model card conventions, active parameter counts reflect pure text forward-pass activation with tied/single embedding space:
+        $$\text{Backbone Shared } (1.43\text{B}) + \text{Active Routed } (1.01\text{B}) + \text{Token Embedding } (0.51\text{B}) = \mathbf{2.94\text{B}} \approx \mathbf{3.0\text{B}}$$
+      - Both conventions are explicitly documented. The simulator retains $3.81\text{B}$ for on-card weight memory tracking and conservative prefill FLOP bounding to preserve physical parameter conservation ($2.8\text{B} + 32.2\text{B} = 35.0\text{B}$).
   - **Mixtral Parameter Reconciliation**: Previously configured as 12.9B active with 1.5B shared and 45.2B routed across 8 experts ($k=2$). Analytical active count is $1.5 + 2 \times (45.2 / 8) = 1.5 + 11.3 = 12.8\text{B}$. The 12.9B represented an inconsistent rounding discrepancy ($0.1\text{B} > \text{ROUNDING\_TOLERANCE\_B} = 0.05\text{B}$) and has been reconciled to 12.8B.
 
 ### Mathematical Formulations:

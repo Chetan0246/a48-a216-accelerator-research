@@ -73,10 +73,16 @@ def test_cli_qwen_preset_run(capsys):
     captured = capsys.readouterr().out
     assert "ACCELERATOR SIMULATOR: A48 Base" in captured
     assert "19.688 GB" in captured
-    assert "DEFERRED" in captured
+    assert "Gated Attention KV (10 layers, 16-bit):   0.168 GB/seq" in captured
+    assert "Gated DeltaNet State (30 layers, 32-bit): 0.063 GB/seq" in captured
+    assert "Causal Conv1D State (30 layers, 16-bit):  0.001 GB/seq" in captured
+    assert "Total Persistent State:                     0.232 GB/seq (0.929 GB batch)" in captured
+    assert "20.616 GB" in captured
     assert "MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE 35.0B)" in captured
     assert "256 total, top-8 active/token" in captured
     assert "30.5310" in captured
-    assert "DECODE THROUGHPUT CEILING (MoE)" in captured
+    assert "DECODE THROUGHPUT CEILING (MoE - Hybrid Cache Traffic)" in captured
+    assert "1.186 GB/step" in captured
+    assert "1165.19 tokens/s" in captured
 
 

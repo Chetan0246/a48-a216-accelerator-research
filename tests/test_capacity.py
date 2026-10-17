@@ -245,13 +245,14 @@ def test_load_workloads_config_includes_qwen_35b():
     assert qwen.routed_expert_params_b == 32.2
     assert qwen.num_experts == 256
     assert qwen.experts_per_token == 8
-    assert qwen.active_parameters_b == 3.81
-    assert qwen.is_complete is False
-    assert qwen.status == "incomplete_hybrid_cache_deferred"
+    assert qwen.is_complete is True
+    assert qwen.status == "supported"
     assert qwen.attention_type == "hybrid_gated_deltanet"
     assert qwen.hybrid_attention is not None
     assert qwen.hybrid_attention["linear_attention_layers"] == 30
     assert qwen.hybrid_attention["gated_attention_layers"] == 10
+    assert qwen.hybrid_attention["linear_state_precision_bits"] == 32.0
+    assert qwen.hybrid_attention["conv_channels"] == 8192
 
     # Verify incomplete MLA workload is loaded with complete=False
     assert "deepseek-v2-lite" in workloads

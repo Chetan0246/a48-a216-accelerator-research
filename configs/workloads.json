@@ -82,15 +82,23 @@
     "attention_type": "hybrid_gated_deltanet",
     "shared_params_b": 2.8,
     "routed_expert_params_b": 32.2,
-    "is_complete": false,
-    "status": "incomplete_hybrid_cache_deferred",
+    "is_complete": true,
+    "status": "supported",
     "hybrid_attention": {
       "linear_attention_layers": 30,
       "gated_attention_layers": 10,
       "block_pattern": "10 x [3 x (Gated DeltaNet linear attention -> MoE) -> 1 x (Gated Attention -> MoE)]",
-      "linear_mechanism": "gated_deltanet_recurrent_state"
+      "linear_mechanism": "gated_deltanet_recurrent_state",
+      "linear_key_heads": 16,
+      "linear_key_head_dim": 128,
+      "linear_value_heads": 32,
+      "linear_value_head_dim": 128,
+      "linear_state_precision_bits": 32.0,
+      "conv_kernel_size": 4,
+      "conv_channels": 8192,
+      "conv_precision_bits": 16.0
     },
-    "notes": "Qwen 3.6 35B A3B sparse MoE with hybrid attention. 40 layers total: 30 layers Gated DeltaNet (linear attention with fixed-size recurrent state) and 10 layers standard Gated Attention with KV heads. Parameter storage (19.688 GB weights at 4.5 bits) is supported; cache capacity and decode bandwidth projections are deferred until dual recurrent-state and KV-cache modeling is implemented."
+    "notes": "Qwen 3.6 35B A3B sparse MoE with hybrid attention. 40 layers total: 30 layers Gated DeltaNet (linear attention with fixed recurrent state matrix 32 heads x 128 x 128 in FP32) and 10 layers standard Gated Attention (2 KV heads, head dim 256 in FP16). Parameter reconciliation: 35.0B total = 32.2B routed (40 layers x 256 experts x 3.15M params/expert) + 2.8B shared/non-routed (includes 1.43B text backbone + 0.51B embedding + 0.51B untied LM head + 0.41B vision tower). Simulator accounting strictly enforces P_active = P_shared + 8 * (32.2 / 256) = 3.81B on-card active parameters per token, whereas published model card 'A3B' designation refers to the forward-pass text-backbone + single-embedding parameter count (2.43B backbone + 0.51B embedding = 2.94B ~ 3.0B). Dual recurrent-state and standard KV-cache modeling is supported."
   },
   "deepseek-v2-lite": {
     "name": "DeepSeek-V2-Lite",
