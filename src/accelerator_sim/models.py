@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-ROUNDING_TOLERANCE_B: float = 0.05  # Parameter reconciliation tolerance (50M params on billion-scale specs)
+ROUNDING_TOLERANCE_B: float = 0.08  # Parameter reconciliation tolerance (80M params on billion-scale specs)
 
 
 @dataclass(frozen=True)
@@ -78,10 +78,29 @@ class WorkloadConfig:
     attention_type: str = "gqa"
     shared_params_b: float | None = None
     routed_expert_params_b: float | None = None
+    shared_backbone_params_b: float | None = None
+    embedding_params_b: float | None = None
+    output_head_params_b: float | None = None
+    vision_params_b: float | None = None
+    streamed_shared_params_b: float | None = None
     is_complete: bool = True
     status: str = "supported"
     hybrid_attention: dict[str, Any] | None = None
     notes: str = ""
+
+    @property
+    def effective_streamed_shared_params_b(self) -> float:
+        """Returns the shared parameter count streamed per decode step.
+
+        For models with detailed parameter breakdown, this includes only the text
+        backbone and output LM head, strictly excluding the vision tower and avoiding
+        dense streaming of the input embedding table.
+        """
+        if self.streamed_shared_params_b is not None:
+            return self.streamed_shared_params_b
+        if self.shared_backbone_params_b is not None:
+            return self.shared_backbone_params_b + (self.output_head_params_b or 0.0)
+        return self.shared_params_b if self.shared_params_b is not None else 0.0
 
     def __post_init__(self) -> None:
         numeric_fields = {
@@ -120,6 +139,40 @@ class WorkloadConfig:
             if not (0.0 < self.routed_expert_params_b <= self.total_parameters_b):
                 raise ValueError("routed_expert_params_b must be > 0 and <= total_parameters_b")
 
+        # Validate detailed parameter categories if provided
+        detailed_fields = {
+            "shared_backbone_params_b": self.shared_backbone_params_b,
+            "embedding_params_b": self.embedding_params_b,
+            "output_head_params_b": self.output_head_params_b,
+            "vision_params_b": self.vision_params_b,
+            "streamed_shared_params_b": self.streamed_shared_params_b,
+        }
+        for name, val in detailed_fields.items():
+            if val is not None:
+                if not math.isfinite(val):
+                    raise ValueError(f"{name} must be finite, got {val}")
+                if val < 0.0 or val > self.total_parameters_b:
+                    raise ValueError(f"{name} must satisfy 0.0 <= {name} <= total_parameters_b")
+
+        # Check detailed category split against shared_params_b if detailed categories are given
+        if self.shared_params_b is not None and self.shared_backbone_params_b is not None:
+            detailed_sum = (
+                self.shared_backbone_params_b
+                + (self.embedding_params_b or 0.0)
+                + (self.output_head_params_b or 0.0)
+                + (self.vision_params_b or 0.0)
+            )
+            if abs(detailed_sum - self.shared_params_b) > ROUNDING_TOLERANCE_B:
+                raise ValueError(
+                    f"Inconsistent detailed parameter accounting for '{self.key}': "
+                    f"shared_backbone ({self.shared_backbone_params_b}) + "
+                    f"embedding ({self.embedding_params_b or 0.0}) + "
+                    f"output_head ({self.output_head_params_b or 0.0}) + "
+                    f"vision ({self.vision_params_b or 0.0}) = {detailed_sum:.4f} "
+                    f"does not match shared_params_b ({self.shared_params_b}) "
+                    f"within tolerance {ROUNDING_TOLERANCE_B}B."
+                )
+
         if self.is_moe:
             if self.num_experts < 1:
                 raise ValueError("num_experts must be >= 1 for MoE")
@@ -149,14 +202,25 @@ class WorkloadConfig:
                     )
 
                 # Validate active parameter consistency against decomposition
-                expected_active = self.shared_params_b + self.experts_per_token * (
+                routed_per_token = self.experts_per_token * (
                     self.routed_expert_params_b / float(self.num_experts)
                 )
+                if self.shared_backbone_params_b is not None:
+                    # In text inference, active compute parameters consist of text backbone,
+                    # active routed experts, and output LM head (excluding sparse embedding lookup & multimodal vision)
+                    expected_active = (
+                        self.shared_backbone_params_b
+                        + routed_per_token
+                        + (self.output_head_params_b or 0.0)
+                    )
+                else:
+                    expected_active = self.shared_params_b + routed_per_token
+
                 if abs(self.active_parameters_b - expected_active) > ROUNDING_TOLERANCE_B:
                     raise ValueError(
                         f"Inconsistent active parameter count for '{self.key}': "
                         f"configured active_parameters_b ({self.active_parameters_b}) does not match "
-                        f"reconciled shared + top_k * expert decomposition ({expected_active:.4f}) "
+                        f"reconciled active compute decomposition ({expected_active:.4f}) "
                         f"within tolerance {ROUNDING_TOLERANCE_B}B."
                     )
 

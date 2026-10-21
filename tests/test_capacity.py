@@ -241,8 +241,14 @@ def test_load_workloads_config_includes_qwen_35b():
     assert "qwen-3.6-35b-a3b" in workloads
     qwen = workloads["qwen-3.6-35b-a3b"]
     assert qwen.total_parameters_b == 35.0
+    assert qwen.active_parameters_b == 2.94
     assert qwen.shared_params_b == 2.8
     assert qwen.routed_expert_params_b == 32.2
+    assert qwen.shared_backbone_params_b == 1.43
+    assert qwen.embedding_params_b == 0.51
+    assert qwen.output_head_params_b == 0.51
+    assert qwen.vision_params_b == 0.35
+    assert qwen.effective_streamed_shared_params_b == 1.94
     assert qwen.num_experts == 256
     assert qwen.experts_per_token == 8
     assert qwen.is_complete is True

@@ -7,6 +7,20 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class PrefillComputeBreakdown:
+    prompt_tokens: int
+    batch_size: int
+    mode: str
+    shared_backbone_tflop: float
+    routed_expert_tflop: float
+    output_head_tflop: float
+    embedding_lookup_tflop: float  # 0.0 (sparse index lookup, not dense GEMM)
+    vision_tflop: float  # 0.0 in text_only, or dense GEMM if multimodal
+    total_tflop: float
+    active_compute_params_b: float
+
+
+@dataclass(frozen=True)
 class PrefillEstimate:
     params_b: float
     prompt_tokens_per_seq: int
@@ -18,6 +32,103 @@ class PrefillEstimate:
     peak_tflops: float | None = None
     compute_utilization: float | None = None
     idealized_ttft_seconds: float | None = None
+    mode: str = "text_only"
+    breakdown: PrefillComputeBreakdown | None = None
+
+
+def calculate_prefill_compute_breakdown(
+    prompt_tokens: int,
+    batch_size: int,
+    shared_backbone_params_b: float,
+    routed_expert_params_b: float,
+    num_experts: int,
+    experts_per_token: int,
+    output_head_params_b: float = 0.0,
+    embedding_params_b: float = 0.0,
+    vision_params_b: float = 0.0,
+    mode: str = "text_only",
+    vision_tokens_per_seq: int = 0,
+) -> PrefillComputeBreakdown:
+    """Calculates granular prefill FLOP breakdown across parameter categories.
+
+    Explicit accounting:
+        - Text backbone shared weights: Dense GEMMs across prompt length.
+        - Active routed experts: k * (routed_params / E) dense GEMMs across prompt length.
+        - Output LM head: Dense projection to vocabulary.
+        - Input embedding table: Sparse index lookup (0.0 dense matrix FLOPs).
+        - Vision tower: Multimodal encoder GEMMs only charged when mode == 'multimodal'.
+
+    Args:
+        prompt_tokens: Text prompt tokens per sequence.
+        batch_size: Concurrency / batch size.
+        shared_backbone_params_b: Text-backbone shared parameters in billions.
+        routed_expert_params_b: Total routed expert parameters in billions.
+        num_experts: Total expert count in MoE.
+        experts_per_token: Top-k experts activated per token.
+        output_head_params_b: Output LM head parameters in billions.
+        embedding_params_b: Input embedding table parameters in billions.
+        vision_params_b: Vision tower parameters in billions.
+        mode: 'text_only' or 'multimodal'.
+        vision_tokens_per_seq: Image patch tokens per sequence for multimodal prefill.
+
+    Returns:
+        PrefillComputeBreakdown detailing TFLOPs per category.
+    """
+    for name, val in [
+        ("prompt_tokens", prompt_tokens),
+        ("batch_size", batch_size),
+        ("shared_backbone_params_b", shared_backbone_params_b),
+        ("routed_expert_params_b", routed_expert_params_b),
+        ("num_experts", num_experts),
+        ("experts_per_token", experts_per_token),
+        ("output_head_params_b", output_head_params_b),
+        ("embedding_params_b", embedding_params_b),
+        ("vision_params_b", vision_params_b),
+        ("vision_tokens_per_seq", vision_tokens_per_seq),
+    ]:
+        if not math.isfinite(val):
+            raise ValueError(f"{name} must be a finite number, got {val}")
+
+    if prompt_tokens <= 0 or batch_size <= 0:
+        raise ValueError("prompt_tokens and batch_size must be positive")
+    if shared_backbone_params_b < 0 or routed_expert_params_b < 0:
+        raise ValueError("shared_backbone_params_b and routed_expert_params_b cannot be negative")
+    if num_experts < 1 or not (1 <= experts_per_token <= num_experts):
+        raise ValueError("num_experts and experts_per_token must be valid")
+    if output_head_params_b < 0 or embedding_params_b < 0 or vision_params_b < 0:
+        raise ValueError("output_head_params_b, embedding_params_b, and vision_params_b cannot be negative")
+    if vision_tokens_per_seq < 0:
+        raise ValueError("vision_tokens_per_seq cannot be negative")
+    if mode not in ("text_only", "multimodal"):
+        raise ValueError(f"mode must be 'text_only' or 'multimodal', got '{mode}'")
+
+    routed_active_params_b = experts_per_token * (routed_expert_params_b / float(num_experts))
+    active_compute_params_b = shared_backbone_params_b + routed_active_params_b + output_head_params_b
+
+    backbone_tflop = (2.0 * shared_backbone_params_b * prompt_tokens * batch_size) / 1000.0
+    routed_tflop = (2.0 * routed_active_params_b * prompt_tokens * batch_size) / 1000.0
+    head_tflop = (2.0 * output_head_params_b * prompt_tokens * batch_size) / 1000.0
+    embedding_tflop = 0.0  # Sparse index lookup, not matrix multiplication
+
+    if mode == "multimodal" and vision_params_b > 0 and vision_tokens_per_seq > 0:
+        vision_tflop = (2.0 * vision_params_b * vision_tokens_per_seq * batch_size) / 1000.0
+    else:
+        vision_tflop = 0.0
+
+    total_tflop = backbone_tflop + routed_tflop + head_tflop + embedding_tflop + vision_tflop
+
+    return PrefillComputeBreakdown(
+        prompt_tokens=prompt_tokens,
+        batch_size=batch_size,
+        mode=mode,
+        shared_backbone_tflop=backbone_tflop,
+        routed_expert_tflop=routed_tflop,
+        output_head_tflop=head_tflop,
+        embedding_lookup_tflop=embedding_tflop,
+        vision_tflop=vision_tflop,
+        total_tflop=total_tflop,
+        active_compute_params_b=active_compute_params_b,
+    )
 
 
 def calculate_prefill_tflop(
@@ -80,6 +191,8 @@ def estimate_prefill(
     batch_size: int = 1,
     peak_tflops: float = 0.0,
     compute_utilization: float = 0.5,
+    mode: str = "text_only",
+    breakdown: PrefillComputeBreakdown | None = None,
 ) -> PrefillEstimate:
     """Estimates prefill compute work and required/idealized throughput.
 
@@ -102,8 +215,10 @@ def estimate_prefill(
         raise ValueError("peak_tflops cannot be negative")
     if peak_tflops > 0 and not (0 < compute_utilization <= 1.0):
         raise ValueError("compute_utilization must be in (0, 1.0]")
+    if mode not in ("text_only", "multimodal"):
+        raise ValueError(f"mode must be 'text_only' or 'multimodal', got '{mode}'")
 
-    tflop = calculate_prefill_tflop(params_b, prompt_tokens, batch_size)
+    tflop = breakdown.total_tflop if breakdown is not None else calculate_prefill_tflop(params_b, prompt_tokens, batch_size)
     req_tflops = calculate_required_prefill_throughput(tflop, target_ttft_seconds)
 
     idealized_sec = None
@@ -122,4 +237,6 @@ def estimate_prefill(
         peak_tflops=peak_tflops if peak_tflops > 0 else None,
         compute_utilization=compute_utilization if peak_tflops > 0 else None,
         idealized_ttft_seconds=idealized_sec,
+        mode=mode,
+        breakdown=breakdown,
     )

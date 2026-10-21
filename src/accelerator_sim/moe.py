@@ -120,6 +120,13 @@ class MoEOffloadResult:
     offload_mode: str
     limiting_factor: str
     card_cache_traffic_gb: float = 0.0
+    streamed_shared_params_b: float | None = None
+    streamed_shared_traffic_gb: float = 0.0
+    routed_weight_traffic_gb: float = 0.0
+    output_head_traffic_gb: float = 0.0
+    embedding_lookup_traffic_gb: float = 0.0
+    vision_weight_traffic_gb: float = 0.0
+    mode: str = "text_only"
     model_type: str = "first_order_analytical_bound"
     is_validated_predictor: bool = False
     assumptions_note: str = (
@@ -143,6 +150,13 @@ def evaluate_moe_decode(
     expert_inclusion_probs: list[float] | None = None,
     offload_mode: str = "serialized",
     step_cache_traffic_gb: float | None = None,
+    streamed_shared_params_b: float | None = None,
+    shared_backbone_params_b: float | None = None,
+    embedding_params_b: float | None = None,
+    output_head_params_b: float | None = None,
+    vision_params_b: float | None = None,
+    hidden_size: int | None = None,
+    mode: str = "text_only",
 ) -> MoEOffloadResult:
     """Evaluates MoE decode throughput ceiling with on-card and host offloading.
 
@@ -168,6 +182,14 @@ def evaluate_moe_decode(
         host_latency_ms: Fixed per-decode-step host offload dispatch latency in ms.
         expert_inclusion_probs: Optional marginal inclusion probability distribution across experts (summing to top_k).
         offload_mode: 'serialized' (conservative) or 'overlapped' (optimistic ceiling).
+        step_cache_traffic_gb: Optional total cache step traffic in decimal GB.
+        streamed_shared_params_b: Optional shared weights streamed every decode step (text backbone + output LM head).
+        shared_backbone_params_b: Optional text-backbone shared parameters in billions.
+        embedding_params_b: Optional input embedding table parameters in billions.
+        output_head_params_b: Optional output LM head projection parameters in billions.
+        vision_params_b: Optional vision tower / multimodal parameters in billions.
+        hidden_size: Optional transformer hidden dimension for embedding lookup traffic modeling.
+        mode: Execution mode ('text_only' or 'multimodal').
 
     Returns:
         MoEOffloadResult with complete breakdown and ceilings for both execution bounds.
@@ -207,6 +229,25 @@ def evaluate_moe_decode(
     valid_modes = ("serialized", "overlapped")
     if offload_mode not in valid_modes:
         raise ValueError(f"offload_mode must be one of {valid_modes}, got '{offload_mode}'")
+    valid_exec_modes = ("text_only", "multimodal")
+    if mode not in valid_exec_modes:
+        raise ValueError(f"mode must be one of {valid_exec_modes}, got '{mode}'")
+
+    for opt_name, opt_val in [
+        ("streamed_shared_params_b", streamed_shared_params_b),
+        ("shared_backbone_params_b", shared_backbone_params_b),
+        ("embedding_params_b", embedding_params_b),
+        ("output_head_params_b", output_head_params_b),
+        ("vision_params_b", vision_params_b),
+    ]:
+        if opt_val is not None:
+            if not math.isfinite(opt_val):
+                raise ValueError(f"{opt_name} must be a finite number, got {opt_val}")
+            if opt_val < 0:
+                raise ValueError(f"{opt_name} cannot be negative")
+
+    if hidden_size is not None and (not math.isfinite(hidden_size) or hidden_size <= 0):
+        raise ValueError("hidden_size must be a positive integer")
 
     routed_total_b = total_params_b - shared_params_b
     expert_b = routed_total_b / float(total_experts)
@@ -238,9 +279,55 @@ def evaluate_moe_decode(
         )
         expected_total_union = expected_resident_union + expected_nonresident_union
 
-    # On-card memory traffic & step time
-    card_active_params_b = shared_params_b + expected_resident_union * expert_b
-    card_weight_traffic_gb = calculate_stored_weights_gb(card_active_params_b, bits_per_param)
+    # Determine streamed shared parameters
+    if streamed_shared_params_b is not None:
+        effective_streamed_shared_b = streamed_shared_params_b
+    elif shared_backbone_params_b is not None:
+        effective_streamed_shared_b = shared_backbone_params_b + (output_head_params_b or 0.0)
+    else:
+        effective_streamed_shared_b = shared_params_b
+
+    streamed_shared_traffic_gb = calculate_stored_weights_gb(effective_streamed_shared_b, bits_per_param)
+    output_head_traffic_gb = (
+        calculate_stored_weights_gb(output_head_params_b, bits_per_param)
+        if output_head_params_b is not None
+        else 0.0
+    )
+
+    # Active routed expert traffic on card
+    card_routed_params_b = expected_resident_union * expert_b
+    routed_weight_traffic_gb = calculate_stored_weights_gb(card_routed_params_b, bits_per_param)
+
+    # Embedding lookup traffic: in text decode, only 1 token per sequence is fetched
+    if hidden_size is not None:
+        lookup_dim = hidden_size
+    elif embedding_params_b is not None and embedding_params_b > 0:
+        lookup_dim = 2048
+    else:
+        lookup_dim = 0
+
+    if lookup_dim > 0 and (embedding_params_b is not None or streamed_shared_params_b is not None):
+        embedding_lookup_bytes = batch_size * lookup_dim * 2.0  # FP16/BF16 token vector (2 bytes)
+        embedding_lookup_traffic_gb = embedding_lookup_bytes / 1e9
+    else:
+        embedding_lookup_traffic_gb = 0.0
+
+    # Vision weights traffic: strictly 0 in text_only mode
+    if mode == "text_only":
+        vision_weight_traffic_gb = 0.0
+    else:
+        vision_weight_traffic_gb = (
+            calculate_stored_weights_gb(vision_params_b, bits_per_param)
+            if vision_params_b is not None
+            else 0.0
+        )
+
+    card_weight_traffic_gb = (
+        streamed_shared_traffic_gb
+        + routed_weight_traffic_gb
+        + embedding_lookup_traffic_gb
+        + vision_weight_traffic_gb
+    )
     card_cache_traffic_gb = (
         step_cache_traffic_gb if step_cache_traffic_gb is not None else (kv_cache_per_sequence_gb * batch_size)
     )
@@ -314,6 +401,13 @@ def evaluate_moe_decode(
         offload_mode=offload_mode,
         limiting_factor=limiting,
         card_cache_traffic_gb=card_cache_traffic_gb,
+        streamed_shared_params_b=effective_streamed_shared_b,
+        streamed_shared_traffic_gb=streamed_shared_traffic_gb,
+        routed_weight_traffic_gb=routed_weight_traffic_gb,
+        output_head_traffic_gb=output_head_traffic_gb,
+        embedding_lookup_traffic_gb=embedding_lookup_traffic_gb,
+        vision_weight_traffic_gb=vision_weight_traffic_gb,
+        mode=mode,
         model_type="first_order_analytical_bound",
         is_validated_predictor=False,
         assumptions_note=(

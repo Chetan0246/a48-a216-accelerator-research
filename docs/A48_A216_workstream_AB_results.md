@@ -66,6 +66,9 @@ Sources for these references include the [RTX 5090 specification page](https://w
 - Capacity accounting with effective weight bits/parameter, KV precision, batch, and runtime reserve.
 - Standard K/V cache formula in decimal GB.
 - Hybrid linear-attention and gated-attention dual cache modeling (Qwen3.6-35B-A3B: 30 Gated DeltaNet recurrent state + 10 standard gated-attention KV layers + 1D causal convolution state).
+- Explicit parameter categories: routed expert weights, shared text backbone, input embedding table, output LM head, and multimodal vision tower.
+- Separation of physical weight storage (total 35.0B stored = 19.688 GB) from decode weight streaming (1.94B streamed shared weights = 1.091 GB, sparse per-token embedding lookup, and vision tower exclusion in text-only mode).
+- Active compute parameter reconciliation for sparse MoE (reconciling Qwen text forward pass to 2.94B ~ 3.0B active parameters for official 'A3B' designation).
 - Dense weight-streaming decode roofline.
 - MoE expected distinct-expert union across a batch under uniform independent top-k routing and explicit marginal inclusion probability distributions.
 - Device-resident experts versus host-offloaded experts, with user-supplied host bandwidth and latency assumptions, reporting both serialized and overlapped execution bounds.

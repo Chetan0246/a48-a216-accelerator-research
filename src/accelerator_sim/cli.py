@@ -229,6 +229,7 @@ def main(argv=None):
         print(f"  - Capacity Status:      {'FITS IN ACCELERATOR MEMORY' if cap_eval.fits_in_memory else 'DOES NOT FIT (OOM)'}")
 
         resident = experts if args.resident_experts is None else args.resident_experts
+        streamed_shared = wl.effective_streamed_shared_params_b if (args.workload and wl is not None) else shared_params_b
         moe_res = evaluate_moe_decode(
             total_experts=experts,
             resident_experts=resident,
@@ -243,6 +244,13 @@ def main(argv=None):
             host_latency_ms=args.host_expert_latency_ms,
             offload_mode=args.offload_mode,
             step_cache_traffic_gb=h_breakdown.total_step_cache_traffic_gb,
+            streamed_shared_params_b=streamed_shared,
+            shared_backbone_params_b=wl.shared_backbone_params_b if (args.workload and wl is not None) else None,
+            embedding_params_b=wl.embedding_params_b if (args.workload and wl is not None) else None,
+            output_head_params_b=wl.output_head_params_b if (args.workload and wl is not None) else None,
+            vision_params_b=wl.vision_params_b if (args.workload and wl is not None) else None,
+            hidden_size=wl.hidden_size if (args.workload and wl is not None) else None,
+            mode="text_only",
         )
 
         print(f"\n[2] MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE {params_b:.1f}B)")
@@ -254,6 +262,13 @@ def main(argv=None):
 
         print("\n[3] DECODE THROUGHPUT CEILING (MoE - Hybrid Cache Traffic)")
         print(f"  - Card Weight Traffic:  {moe_res.card_weight_traffic_gb:.3f} GB/step ({moe_res.card_step_time_ms:.2f} ms)")
+        print("  - Card Weight Traffic Breakdown:")
+        print(f"    * Streamed Shared Weights: {moe_res.streamed_shared_traffic_gb:.3f} GB/step ({moe_res.streamed_shared_params_b:.2f}B params: backbone + LM head)")
+        if moe_res.output_head_traffic_gb > 0:
+            print(f"      (incl. Output LM Head:   {moe_res.output_head_traffic_gb:.3f} GB/step)")
+        print(f"    * Active Routed Experts:   {moe_res.routed_weight_traffic_gb:.3f} GB/step ({moe_res.expected_resident_union:.4f} unique resident experts)")
+        print(f"    * Embedding Lookup:        {moe_res.embedding_lookup_traffic_gb:.6f} GB/step (sparse per-token index gather)")
+        print(f"    * Vision Tower Weights:    {moe_res.vision_weight_traffic_gb:.3f} GB/step (excluded in text-only mode)")
         print("  - Cache Step Traffic Breakdown:")
         print(f"    * Attention KV Read:   {h_breakdown.step_attn_kv_read_gb:.3f} GB/step (O(S) context history)")
         print(f"    * Attention KV Write:  {h_breakdown.step_attn_kv_write_gb:.4f} GB/step (new token KV)")
@@ -276,6 +291,7 @@ def main(argv=None):
         prefill_tflop = calculate_prefill_tflop(active_params, args.prompt_tokens, args.batch)
         req_tflops = calculate_required_prefill_throughput(prefill_tflop, args.ttft_seconds)
         print(f"\n[4] PREFILL COMPUTE ESTIMATE (Prompt: {args.prompt_tokens:,} tokens/seq, Batch: {args.batch})")
+        print(f"  - Active Compute Params:{active_params:.2f}B (reconciled text forward pass)")
         print(f"  - Dense-equivalent Work:{prefill_tflop:.3f} TFLOP (2 * P_active * S * B)")
         print(f"  - Target TTFT Budget:   {args.ttft_seconds:.2f} s")
         print(f"  - Required Throughput:  {req_tflops:.1f} effective TFLOP/s")
@@ -348,6 +364,7 @@ def main(argv=None):
     else:
         # MoE Architecture
         resident = experts if args.resident_experts is None else args.resident_experts
+        streamed_shared = wl.effective_streamed_shared_params_b if (args.workload and wl is not None) else shared_params_b
         moe_res = evaluate_moe_decode(
             total_experts=experts,
             resident_experts=resident,
@@ -361,6 +378,13 @@ def main(argv=None):
             host_bw_tb_s=args.host_expert_bandwidth_tb_s,
             host_latency_ms=args.host_expert_latency_ms,
             offload_mode=args.offload_mode,
+            streamed_shared_params_b=streamed_shared,
+            shared_backbone_params_b=wl.shared_backbone_params_b if (args.workload and wl is not None) else None,
+            embedding_params_b=wl.embedding_params_b if (args.workload and wl is not None) else None,
+            output_head_params_b=wl.output_head_params_b if (args.workload and wl is not None) else None,
+            vision_params_b=wl.vision_params_b if (args.workload and wl is not None) else None,
+            hidden_size=wl.hidden_size if (args.workload and wl is not None) else None,
+            mode="text_only",
         )
         print(f"\n[1] MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE {params_b:.1f}B)")
         print(f"  - Routed Experts:       {experts} total, top-{top_k} active/token")

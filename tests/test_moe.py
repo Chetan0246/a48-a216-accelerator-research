@@ -262,4 +262,179 @@ def test_evaluate_moe_decode_with_explicit_cache_traffic():
     assert pytest.approx(res.card_weight_traffic_gb + 1.5, rel=1e-5) == (res.card_weight_traffic_gb + res.card_cache_traffic_gb)
 
 
+def test_moe_decode_weight_streaming_categories():
+    """Separation of weight storage from decode weight streaming.
+
+    Text-only decode streams shared text backbone + active routed experts + output LM head,
+    strictly excludes vision tower weights, and avoids dense streaming of the embedding table.
+    """
+    # Qwen-like parameters:
+    # 35.0B total, 32.2B routed (256 experts, top-8) -> 0.1258B/expert, 1.006B active/token
+    # Non-routed shared pool: 2.8B = 1.43B backbone + 0.51B embedding + 0.51B head + 0.35B vision
+    # Streamed shared parameters: 1.43B backbone + 0.51B head = 1.94B
+    b = 4
+    res_text = evaluate_moe_decode(
+        total_experts=256,
+        resident_experts=256,
+        top_k=8,
+        shared_params_b=2.8,
+        total_params_b=35.0,
+        bits_per_param=4.5,
+        batch_size=b,
+        kv_cache_per_sequence_gb=0.232,
+        card_sustained_bw_tb_s=1.4336,
+        streamed_shared_params_b=1.94,
+        shared_backbone_params_b=1.43,
+        embedding_params_b=0.51,
+        output_head_params_b=0.51,
+        vision_params_b=0.35,
+        hidden_size=2048,
+        mode="text_only",
+    )
+
+    # 1. Streamed shared traffic corresponds to 1.94B parameters: 1.94 * 4.5 / 8 = 1.09125 GB
+    assert pytest.approx(res_text.streamed_shared_traffic_gb, rel=1e-4) == (1.94 * 4.5 / 8.0)
+    assert res_text.streamed_shared_params_b == 1.94
+
+    # 2. Output head traffic corresponds to 0.51B parameters: 0.51 * 4.5 / 8 = 0.286875 GB
+    assert pytest.approx(res_text.output_head_traffic_gb, rel=1e-4) == (0.51 * 4.5 / 8.0)
+
+    # 3. Vision tower weights are strictly 0 in text-only decode
+    assert res_text.vision_weight_traffic_gb == 0.0
+
+    # 4. Input embedding table is NOT streamed densely (saving 0.51 * 4.5 / 8 = 0.287 GB);
+    # only sparse lookup traffic: 4 tokens * 2048 dim * 2 bytes = 16,384 bytes = 0.000016384 GB
+    expected_lookup_gb = (b * 2048 * 2.0) / 1e9
+    assert pytest.approx(res_text.embedding_lookup_traffic_gb, rel=1e-4) == expected_lookup_gb
+    assert res_text.embedding_lookup_traffic_gb < 1e-4  # negligible compared to GB weight streams
+
+    # 5. Routed weight traffic: E[U(4)] unique experts * expert_size * bits / 8
+    expected_union = calculate_expected_expert_union(256, 8, batch_size=b)
+    expert_size_b = 32.2 / 256.0
+    expected_routed_gb = (expected_union * expert_size_b * 4.5) / 8.0
+    assert pytest.approx(res_text.routed_weight_traffic_gb, rel=1e-4) == expected_routed_gb
+
+    # 6. Total card weight traffic sums the components without double counting
+    expected_card_weight_traffic = (
+        res_text.streamed_shared_traffic_gb
+        + res_text.routed_weight_traffic_gb
+        + res_text.embedding_lookup_traffic_gb
+        + res_text.vision_weight_traffic_gb
+    )
+    assert pytest.approx(res_text.card_weight_traffic_gb, rel=1e-5) == expected_card_weight_traffic
+
+    # 7. In multimodal mode, vision tower weights are charged
+    res_mm = evaluate_moe_decode(
+        total_experts=256,
+        resident_experts=256,
+        top_k=8,
+        shared_params_b=2.8,
+        total_params_b=35.0,
+        bits_per_param=4.5,
+        batch_size=b,
+        kv_cache_per_sequence_gb=0.232,
+        card_sustained_bw_tb_s=1.4336,
+        streamed_shared_params_b=1.94,
+        shared_backbone_params_b=1.43,
+        embedding_params_b=0.51,
+        output_head_params_b=0.51,
+        vision_params_b=0.35,
+        hidden_size=2048,
+        mode="multimodal",
+    )
+    assert pytest.approx(res_mm.vision_weight_traffic_gb, rel=1e-4) == (0.35 * 4.5 / 8.0)
+    assert res_mm.card_weight_traffic_gb > res_text.card_weight_traffic_gb
+
+
+def test_storage_constancy_and_parameter_conservation():
+    """Validates parameter conservation invariant and storage constancy."""
+    from accelerator_sim.capacity import calculate_stored_weights_gb, evaluate_capacity
+    from accelerator_sim.models import WorkloadConfig
+
+    # 1. Total storage invariant: Total parameters = 35.0B regardless of inference mode
+    stored_weights_gb = calculate_stored_weights_gb(params_b=35.0, bits_per_param=4.5)
+    assert pytest.approx(stored_weights_gb, rel=1e-5) == 19.6875
+
+    # Memory footprint in capacity evaluation remains identical
+    cap_eval = evaluate_capacity(
+        physical_memory_gb=48.0,
+        params_b=35.0,
+        kv_cache_gb=0.929,
+        bits_per_param=4.5,
+        runtime_reserve_gb=4.0,
+    )
+    assert pytest.approx(cap_eval.weights_gb, rel=1e-5) == 19.6875
+
+    # 2. WorkloadConfig parameter conservation validation:
+    # Valid decomposition
+    valid_cfg = WorkloadConfig(
+        key="test_qwen",
+        name="Test Qwen",
+        total_parameters_b=35.0,
+        active_parameters_b=2.94,
+        num_layers=40,
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_kv_heads=2,
+        head_dim=256,
+        is_moe=True,
+        num_experts=256,
+        experts_per_token=8,
+        shared_params_b=2.8,
+        routed_expert_params_b=32.2,
+        shared_backbone_params_b=1.43,
+        embedding_params_b=0.51,
+        output_head_params_b=0.51,
+        vision_params_b=0.35,
+        streamed_shared_params_b=1.94,
+    )
+    assert valid_cfg.effective_streamed_shared_params_b == 1.94
+
+    # 3. Invalid detailed split: detailed categories do not sum to shared_params_b
+    with pytest.raises(ValueError, match="Inconsistent detailed parameter accounting"):
+        WorkloadConfig(
+            key="test_bad_split",
+            name="Test Bad Split",
+            total_parameters_b=35.0,
+            active_parameters_b=2.94,
+            num_layers=40,
+            hidden_size=2048,
+            num_attention_heads=16,
+            num_kv_heads=2,
+            head_dim=256,
+            is_moe=True,
+            num_experts=256,
+            experts_per_token=8,
+            shared_params_b=2.8,
+            routed_expert_params_b=32.2,
+            shared_backbone_params_b=1.43,
+            embedding_params_b=0.51,
+            output_head_params_b=0.51,
+            vision_params_b=1.50,  # deliberately incorrect (sum = 3.95 != 2.8)
+        )
+
+    # 4. Inconsistent active parameter count: active_parameters_b does not match decomposition
+    with pytest.raises(ValueError, match="Inconsistent active parameter count"):
+        WorkloadConfig(
+            key="test_bad_active",
+            name="Test Bad Active",
+            total_parameters_b=35.0,
+            active_parameters_b=5.0,  # deliberately wrong active count
+            num_layers=40,
+            hidden_size=2048,
+            num_attention_heads=16,
+            num_kv_heads=2,
+            head_dim=256,
+            is_moe=True,
+            num_experts=256,
+            experts_per_token=8,
+            shared_params_b=2.8,
+            routed_expert_params_b=32.2,
+            shared_backbone_params_b=1.43,
+            embedding_params_b=0.51,
+            output_head_params_b=0.51,
+            vision_params_b=0.35,
+        )
+
+
 

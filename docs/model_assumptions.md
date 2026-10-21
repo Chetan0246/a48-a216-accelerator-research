@@ -97,17 +97,32 @@ This document formalizes the mathematical equations, hardware simplifications, a
     - **Routed expert parameters**: 40 layers $\times 256$ experts $\times (3 \times 2048 \times 512) = 32,212,254,720$ parameters ($\mathbf{32.21\text{B}} \approx 32.2\text{B}$).
     - **Per-expert size**: $3 \times 2048 \times 512 = 3,145,728$ parameters ($0.00315\text{B}$).
     - **Active routed parameters per token** (top-8): $40 \times 8 \times 3,145,728 = 1,006,632,960$ parameters ($\mathbf{1.01\text{B}}$).
-    - **Shared / non-routed parameter pool**: Total weights stored on device must house all $35.0\text{B}$ parameters. The non-routed pool is $35.0 - 32.21 = \mathbf{2.79\text{B}} \approx \mathbf{2.8\text{B}}$, composed of:
-      1. Text backbone shared layers (10 full attention + 30 linear attention + 40 shared experts + routers): $\mathbf{1.43\text{B}}$.
-      2. Input embedding table ($248,320 \times 2048$): $\mathbf{0.51\text{B}}$.
-      3. Output LM head (`tie_word_embeddings: false`, $248,320 \times 2048$): $\mathbf{0.51\text{B}}$.
-      4. Vision encoder tower (depth 27, hidden size 1152, intermediate 4304) included in multimodal conditional generation weights: $\mathbf{\approx 0.41\text{B}}$.
-    - **Reconciling Conventions**:
-      - **Simulator on-card active parameters**: In the simulator's strict parameter accounting, all resident non-routed weights ($2.8\text{B}$) remain in memory and are accounted as shared baseline parameters, yielding $P_{\text{active}} = 2.8 + 8 \times (32.2 / 256) = \mathbf{3.81\text{B}}$.
-      - **Published Model Card ("A3B") Designation**: In open-weights model card conventions, active parameter counts reflect pure text forward-pass activation with tied/single embedding space:
-        $$\text{Backbone Shared } (1.43\text{B}) + \text{Active Routed } (1.01\text{B}) + \text{Token Embedding } (0.51\text{B}) = \mathbf{2.94\text{B}} \approx \mathbf{3.0\text{B}}$$
-      - Both conventions are explicitly documented. The simulator retains $3.81\text{B}$ for on-card weight memory tracking and conservative prefill FLOP bounding to preserve physical parameter conservation ($2.8\text{B} + 32.2\text{B} = 35.0\text{B}$).
-  - **Mixtral Parameter Reconciliation**: Previously configured as 12.9B active with 1.5B shared and 45.2B routed across 8 experts ($k=2$). Analytical active count is $1.5 + 2 \times (45.2 / 8) = 1.5 + 11.3 = 12.8\text{B}$. The 12.9B represented an inconsistent rounding discrepancy ($0.1\text{B} > \text{ROUNDING\_TOLERANCE\_B} = 0.05\text{B}$) and has been reconciled to 12.8B.
+    - **Parameter Accounting & Explicit Categories**:
+      - Total parameters stored on device must house all physical weights:
+        $$P_{\text{total}} = P_{\text{routed}} + P_{\text{non\_routed}} = 35.0\text{B}$$
+      - **Non-routed shared pool ($2.8\text{B}$)** is decomposed into four explicit categories:
+        1. **Shared text-backbone weights** ($P_{\text{backbone}} = 1.43\text{B}$): 10 gated attention layers, 30 Gated DeltaNet linear attention layers, 40 shared experts, 40 routers, and layer norms.
+        2. **Input embedding table** ($P_{\text{embed}} = 0.51\text{B}$): $248,320 \times 2048$ token embedding matrix ($0.5086\text{B}$).
+        3. **Output LM head** ($P_{\text{head}} = 0.51\text{B}$): Untied language model projection head ($248,320 \times 2048$, $0.5086\text{B}$, `tie_word_embeddings: false`).
+        4. **Vision tower / multimodal weights** ($P_{\text{vision}} = 0.35\text{B} - 0.41\text{B}$): Depth 27, hidden size 1152, intermediate 4304; residual multimodal parameters within $0.08\text{B}$ tolerance.
+      - **Parameter Conservation Invariant**:
+        $$P_{\text{total}} = P_{\text{routed}} + P_{\text{backbone}} + P_{\text{embed}} + P_{\text{head}} + P_{\text{vision}}$$
+        Enforced strictly with validation rejecting inconsistent splits or unallocated parameters.
+      - **Storage Constancy**:
+        Regardless of whether running text-only or multimodal inference, accelerator physical memory capacity must store all $35.0\text{B}$ parameters ($19.688\text{ GB}$ at 4.5 bpp). Weights are never removed from device storage merely because they are not streamed on every decode step.
+    - **Separation of Storage from Decode Weight Traffic**:
+      The decode phase does not stream all stored weights on every step:
+      1. **Streamed shared text weights** ($P_{\text{streamed\_shared}} = 1.94\text{B}$): Only the text backbone ($1.43\text{B}$) and output LM head ($0.51\text{B}$) are streamed on each decode step ($1.94 \times 4.5 / 8 = 1.091\text{ GB}$).
+      2. **Active routed experts**: Streamed according to expected expert union $\mathbb{E}[U(B)] \times (32.2\text{B} / 256)$.
+      3. **Input embedding table (sparse lookup)**: In text decode, each sequence inputs only 1 newly generated token. Only $B \times d_{\text{model}} \times \text{bytes} = B \times 2048 \times 2 = 4,096 \times B$ bytes ($\approx 4\text{ KB} \times B$) are gathered from memory, avoiding $0.287\text{ GB}$ of unnecessary dense table streaming per step.
+      4. **Vision tower weights**: Strictly excluded ($0.0\text{ GB}$ streamed) from text-only decode weight streaming.
+      5. **Total card weight traffic**:
+         $$W_{\text{step}} = W_{\text{streamed\_shared}} + W_{\text{routed}}(\mathbb{E}[U]) + W_{\text{embed\_lookup}} + W_{\text{vision\_conditional}}$$
+    - **Active Compute Reconciliation ("A3B")**:
+      In text forward passes, active dense compute parameters are:
+      $$P_{\text{active\_compute}} = P_{\text{backbone}} + k \times P_{\text{expert}} + P_{\text{head}} = 1.43 + 8 \times (32.2 / 256) + 0.51 = 2.946\text{B} \approx \mathbf{2.94\text{B}} \approx \mathbf{3.0\text{B}}$$
+      This rigorously reconciles the published model card designation **A3B** (Active 3 Billion). Input embedding lookup is an $O(1)$ table index gather ($0.0$ GEMM FLOPs), and the vision tower is conditional multimodal-only ($0.0$ FLOPs for text generation).
+  - **Mixtral Parameter Reconciliation**: Standard MoE without multimodal tower; active count is $1.5 + 2 \times (45.2 / 8) = 12.8\text{B}$.
 
 ### Mathematical Formulations:
 - **Expected Unique Experts**:

@@ -82,7 +82,12 @@ def test_cli_qwen_preset_run(capsys):
     assert "256 total, top-8 active/token" in captured
     assert "30.5310" in captured
     assert "DECODE THROUGHPUT CEILING (MoE - Hybrid Cache Traffic)" in captured
+    assert "Card Weight Traffic Breakdown:" in captured
+    assert "Streamed Shared Weights: 1.091 GB/step (1.94B params: backbone + LM head)" in captured
+    assert "Output LM Head:   0.287 GB/step" in captured
+    assert "Active Routed Experts:   2.160 GB/step" in captured
+    assert "Vision Tower Weights:    0.000 GB/step (excluded in text-only mode)" in captured
     assert "1.186 GB/step" in captured
-    assert "1165.19 tokens/s" in captured
+    assert "1292.21 tokens/s" in captured
 
 
