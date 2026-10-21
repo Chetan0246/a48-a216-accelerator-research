@@ -59,12 +59,36 @@ This document formalizes the mathematical equations, hardware simplifications, a
 ---
 
 ## 3. Prefill Phase Compute (TTFT)
-- First-order dense-equivalent FLOPs for prompt processing:
+- **Generic First-Order Model**:
+  For workloads lacking detailed parameter categorization:
   $$F_{\text{TFLOP}} = \frac{2 \times P_{\text{B}} \times S \times B}{1000}$$
   where $P_{\text{B}}$ is parameter count in billions, $S$ is prompt tokens per sequence, and $B$ is batch size.
-- Required effective compute throughput for a target time-to-first-token (TTFT) budget $T_{\text{budget}}$:
-  $$R_{\text{TFLOP/s}} = \frac{F_{\text{TFLOP}}}{T_{\text{budget}}}$$
-- *Omitted in first-order model*: Quadratic attention FLOPs ($4LS^2D$), logits projection overhead, and padding tokens.
+- **Granular Category-Aware Prefill Breakdown**:
+  For workloads with explicit parameter splits (e.g. Qwen3.6-35B-A3B):
+  $$F_{\text{backbone}} = \frac{2 \times P_{\text{backbone}} \times S \times B}{1000}$$
+  $$F_{\text{routed\_active}} = \frac{2 \times k \times (P_{\text{routed}} / E) \times S \times B}{1000}$$
+  $$F_{\text{head}} = \frac{2 \times P_{\text{head}} \times \text{logit\_positions} \times B}{1000}$$
+  $$F_{\text{embed}} = 0.0\quad\text{(sparse token index gather, 0 GEMM FLOPs)}$$
+  $$F_{\text{vision}} = \begin{cases} \frac{2 \times P_{\text{vision}} \times S_{\text{vision}} \times B}{1000} & \text{if mode = multimodal} \\ 0.0 & \text{if mode = text\_only} \end{cases}$$
+  $$F_{\text{total}} = F_{\text{backbone}} + F_{\text{routed\_active}} + F_{\text{head}} + F_{\text{embed}} + F_{\text{vision}}$$
+- **Logit Positions & TTFT Semantics (`logits_to_keep`)**:
+  - In standard next-token generation (Time-To-First-Token, TTFT), the model only computes logits for the final prompt position ($\text{logit\_positions} = 1$). This corresponds directly to the official Qwen and HuggingFace `logits_to_keep=1` parameter in causal LM forward calls, reducing output projection GEMM FLOPs by a factor of $S$.
+  - In evaluation, perplexity measurement, or training modes, logits may be computed for all prompt positions ($\text{logit\_positions} = S$).
+  - Required throughput for target time-to-first-token budget $T_{\text{budget}}$:
+    $$R_{\text{TFLOP/s}} = \frac{F_{\text{total}}}{T_{\text{budget}}}$$
+- *Omitted in first-order model*: Quadratic attention FLOPs ($4LS^2D$), normalization, and padding tokens.
+
+---
+
+## 4. Phase-Aware Vision Encoding Stage
+- **Separation of Vision Encoding from Autoregressive Decoding**:
+  - Vision encoding operates as a distinct initial stage modeled via `calculate_vision_encoding_stage(vision_params_b, image_tokens_per_seq, bits_per_param, batch_size)`.
+  - The vision tower encodes input image patches once per prompt sequence, producing image patch token embeddings:
+    $$W_{\text{vision\_stage}} = \frac{P_{\text{vision}} \times \text{bits\_per\_param}}{8}$$
+    $$F_{\text{vision\_stage}} = \frac{2 \times P_{\text{vision}} \times S_{\text{vision}} \times B}{1000}$$
+  - **Decode Phase Isolation**: Multimodal sessions do NOT stream vision-tower weights during output-token autoregressive generation. Each decode step generates text tokens and only processes language attention/recurrent states.
+  - The parameter `execute_vision_encoder` defaults to `False` in `evaluate_moe_decode()`, ensuring vision weights are only streamed during decode if the caller explicitly requests an interleaved multimodal encoding step.
+  - **Storage Constancy Preserved**: Regardless of whether inference is text-only or multimodal, the accelerator physical memory must hold all $35.0\text{B}$ parameters ($19.688\text{ GB}$). Model weights are never purged from physical capacity merely because they are idle during decode.
 
 ---
 
@@ -112,16 +136,22 @@ This document formalizes the mathematical equations, hardware simplifications, a
         Regardless of whether running text-only or multimodal inference, accelerator physical memory capacity must store all $35.0\text{B}$ parameters ($19.688\text{ GB}$ at 4.5 bpp). Weights are never removed from device storage merely because they are not streamed on every decode step.
     - **Separation of Storage from Decode Weight Traffic**:
       The decode phase does not stream all stored weights on every step:
-      1. **Streamed shared text weights** ($P_{\text{streamed\_shared}} = 1.94\text{B}$): Only the text backbone ($1.43\text{B}$) and output LM head ($0.51\text{B}$) are streamed on each decode step ($1.94 \times 4.5 / 8 = 1.091\text{ GB}$).
-      2. **Active routed experts**: Streamed according to expected expert union $\mathbb{E}[U(B)] \times (32.2\text{B} / 256)$.
-      3. **Input embedding table (sparse lookup)**: In text decode, each sequence inputs only 1 newly generated token. Only $B \times d_{\text{model}} \times \text{bytes} = B \times 2048 \times 2 = 4,096 \times B$ bytes ($\approx 4\text{ KB} \times B$) are gathered from memory, avoiding $0.287\text{ GB}$ of unnecessary dense table streaming per step.
-      4. **Vision tower weights**: Strictly excluded ($0.0\text{ GB}$ streamed) from text-only decode weight streaming.
-      5. **Total card weight traffic**:
-         $$W_{\text{step}} = W_{\text{streamed\_shared}} + W_{\text{routed}}(\mathbb{E}[U]) + W_{\text{embed\_lookup}} + W_{\text{vision\_conditional}}$$
+      1. **Shared text-backbone weights** ($P_{\text{backbone}} = 1.43\text{B}$): Streamed on each decode step ($1.43 \times 4.5 / 8 = 0.804\text{ GB}$).
+      2. **Output LM head** ($P_{\text{head}} = 0.51\text{B}$): Dense projection to vocabulary, streamed on each step ($0.51 \times 4.5 / 8 = 0.287\text{ GB}$).
+      3. **Streamed shared text weights** ($P_{\text{streamed\_shared}} = 1.94\text{B}$): The sum of backbone and output head ($1.94 \times 4.5 / 8 = 1.091\text{ GB}$).
+      4. **Active routed experts**: Streamed according to expected expert union $\mathbb{E}[U(B)] \times (32.2\text{B} / 256) \times (4.5 / 8)$.
+      5. **Input embedding table (sparse lookup)**: In text decode, each sequence inputs only 1 newly generated token. Only $B \times d_{\text{model}} \times (\text{embedding\_precision\_bits} / 8)$ bytes are gathered from memory (at 16-bit precision: $B \times 2048 \times 2 = 4,096 \times B$ bytes $\approx 4\text{ KB} \times B$), avoiding $0.287\text{ GB}$ of unnecessary dense table streaming per step.
+      6. **Vision tower weights**: Excluded ($0.0\text{ GB}$ streamed) from text-only decode and standard multimodal autoregressive token generation. Only streamed if `execute_vision_encoder=True` is explicitly specified for that step.
+      7. **Disjoint Additive Traffic Columns**:
+         The simulator reports mutually exclusive, disjoint weight traffic components that sum strictly without double counting:
+         $$\text{card\_weight\_traffic\_gb} = W_{\text{backbone}} + W_{\text{output\_head}} + W_{\text{routed}} + W_{\text{embed\_lookup}} + W_{\text{vision}}$$
+         where $W_{\text{streamed\_shared}} = W_{\text{backbone}} + W_{\text{output\_head}}$.
     - **Active Compute Reconciliation ("A3B")**:
       In text forward passes, active dense compute parameters are:
       $$P_{\text{active\_compute}} = P_{\text{backbone}} + k \times P_{\text{expert}} + P_{\text{head}} = 1.43 + 8 \times (32.2 / 256) + 0.51 = 2.946\text{B} \approx \mathbf{2.94\text{B}} \approx \mathbf{3.0\text{B}}$$
       This rigorously reconciles the published model card designation **A3B** (Active 3 Billion). Input embedding lookup is an $O(1)$ table index gather ($0.0$ GEMM FLOPs), and the vision tower is conditional multimodal-only ($0.0$ FLOPs for text generation).
+    - **Multi-Token Prediction (MTP) Parameter Inventory Scope**:
+      The official Qwen3.6-35B-A3B architecture specifies auxiliary multi-token prediction heads (`num_nextn_predict_layers: 1`) used for speculative decoding drafting. In standard non-speculative autoregressive serving (the scope of Workstreams A & B), auxiliary drafting layers are neither loaded into memory nor executed; `mtp_params_b = 0.0`. Speculative decoding modeling remains explicitly deferred.
   - **Mixtral Parameter Reconciliation**: Standard MoE without multimodal tower; active count is $1.5 + 2 \times (45.2 / 8) = 12.8\text{B}$.
 
 ### Mathematical Formulations:

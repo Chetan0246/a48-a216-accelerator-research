@@ -67,6 +67,11 @@ Sources for these references include the [RTX 5090 specification page](https://w
 - Standard K/V cache formula in decimal GB.
 - Hybrid linear-attention and gated-attention dual cache modeling (Qwen3.6-35B-A3B: 30 Gated DeltaNet recurrent state + 10 standard gated-attention KV layers + 1D causal convolution state).
 - Explicit parameter categories: routed expert weights, shared text backbone, input embedding table, output LM head, and multimodal vision tower.
+- Phase-aware vision encoding separation: vision tower weights are modeled as an independent one-time encoding stage (`calculate_vision_encoding_stage`) and are not streamed during autoregressive token decoding unless explicitly requested (`execute_vision_encoder=True`).
+- Granular prefill compute breakdown: separate FLOP accounting for shared text backbone, active routed experts, output LM head (scaling with `logit_positions`, matching Qwen / HF `logits_to_keep=1` for next-token TTFT prediction), sparse embedding lookup (0 GEMM FLOPs), and vision tower (multimodal only).
+- Configurable embedding precision (`embedding_precision_bits`) for sparse per-token index gather.
+- Mutually exclusive, strictly additive decode weight traffic components (`card_weight_traffic_gb = backbone + output_head + routed + embedding_lookup + vision`).
+- Explicit parameter inventory for Multi-Token Prediction (MTP) auxiliary drafting heads (`mtp_params_b = 0.0`), documenting non-speculative baseline deployment while speculative decoding modeling remains explicitly deferred.
 - Separation of physical weight storage (total 35.0B stored = 19.688 GB) from decode weight streaming (1.94B streamed shared weights = 1.091 GB, sparse per-token embedding lookup, and vision tower exclusion in text-only mode).
 - Active compute parameter reconciliation for sparse MoE (reconciling Qwen text forward pass to 2.94B ~ 3.0B active parameters for official 'A3B' designation).
 - Dense weight-streaming decode roofline.
@@ -98,7 +103,7 @@ python -m accelerator_sim.cli --system A48 --workload qwen-3.6-35b-a3b --batch 4
 ## 6. Explicitly not yet modeled
 
 - Multi-Head Latent Attention (MLA, e.g. DeepSeek-V2/V3): low-rank compressed latent KV cache and decoupled RoPE keys remain strictly deferred (`UnsupportedAttentionTypeError`).
-- Speculative decoding: needs draft-model traffic, acceptance length, verification cost, and separate prefill/decode measurements.
+- Speculative decoding: needs draft-model traffic, acceptance length, verification cost, and separate prefill/decode measurements; auxiliary Multi-Token Prediction (MTP) drafting heads (e.g., Qwen num_nextn_predict_layers: 1) are cataloged in workload configuration but excluded from non-speculative baseline serving.
 - Multi-card scaling: needs interconnect bandwidth/latency, parallelization strategy, and measured scaling efficiency.
 - Thermal/power derating, process node, die area, HBM4 package feasibility, packaging allocation, and BOM: deliberately deferred until workload/model results justify moving into later workstreams.
 

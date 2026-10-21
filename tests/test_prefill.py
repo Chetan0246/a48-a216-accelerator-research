@@ -87,16 +87,37 @@ def test_calculate_prefill_compute_breakdown():
     # 3. Vision tower has 0 FLOPs in text-only mode
     assert breakdown_text.vision_tflop == 0.0
 
-    # 4. Dense-equivalent work matches sum of components
+    # 4. Dense-equivalent work matches sum of components (default logit_positions=1 for TTFT next-token generation)
     expected_backbone = (2.0 * 1.43 * s * b) / 1000.0
     expected_routed = (2.0 * (8 * (32.2 / 256.0)) * s * b) / 1000.0
-    expected_head = (2.0 * 0.51 * s * b) / 1000.0
-    expected_total = expected_backbone + expected_routed + expected_head
+    expected_head_next_token = (2.0 * 0.51 * 1 * b) / 1000.0
+    expected_total_next_token = expected_backbone + expected_routed + expected_head_next_token
 
     assert pytest.approx(breakdown_text.shared_backbone_tflop, rel=1e-5) == expected_backbone
     assert pytest.approx(breakdown_text.routed_expert_tflop, rel=1e-5) == expected_routed
-    assert pytest.approx(breakdown_text.output_head_tflop, rel=1e-5) == expected_head
-    assert pytest.approx(breakdown_text.total_tflop, rel=1e-5) == expected_total
+    assert pytest.approx(breakdown_text.output_head_tflop, rel=1e-5) == expected_head_next_token
+    assert pytest.approx(breakdown_text.total_tflop, rel=1e-5) == expected_total_next_token
+    assert breakdown_text.logit_positions == 1
+
+    # Full sequence logit evaluation (logit_positions=s)
+    breakdown_full = calculate_prefill_compute_breakdown(
+        prompt_tokens=s,
+        batch_size=b,
+        shared_backbone_params_b=1.43,
+        routed_expert_params_b=32.2,
+        num_experts=256,
+        experts_per_token=8,
+        output_head_params_b=0.51,
+        embedding_params_b=0.51,
+        vision_params_b=0.35,
+        mode="text_only",
+        logit_positions=s,
+    )
+    expected_head_full = (2.0 * 0.51 * s * b) / 1000.0
+    assert pytest.approx(breakdown_full.output_head_tflop, rel=1e-5) == expected_head_full
+    assert breakdown_full.shared_backbone_tflop == breakdown_text.shared_backbone_tflop
+    assert breakdown_full.routed_expert_tflop == breakdown_text.routed_expert_tflop
+    assert pytest.approx(breakdown_full.total_tflop, rel=1e-5) == (expected_backbone + expected_routed + expected_head_full)
 
     # 5. Multimodal prefill charges vision tower GEMMs
     vision_tokens = 576  # typical 24x24 vision patches
@@ -112,10 +133,11 @@ def test_calculate_prefill_compute_breakdown():
         vision_params_b=0.35,
         mode="multimodal",
         vision_tokens_per_seq=vision_tokens,
+        logit_positions=1,
     )
     expected_vision_tflop = (2.0 * 0.35 * vision_tokens * b) / 1000.0
     assert pytest.approx(breakdown_mm.vision_tflop, rel=1e-5) == expected_vision_tflop
-    assert pytest.approx(breakdown_mm.total_tflop, rel=1e-5) == expected_total + expected_vision_tflop
+    assert pytest.approx(breakdown_mm.total_tflop, rel=1e-5) == expected_total_next_token + expected_vision_tflop
 
     # 6. Invalid mode
     with pytest.raises(ValueError, match="mode"):
@@ -128,4 +150,60 @@ def test_calculate_prefill_compute_breakdown():
             experts_per_token=8,
             mode="invalid",
         )
+
+    # 7. Invalid logit_positions boundaries
+    with pytest.raises(ValueError, match="logit_positions"):
+        calculate_prefill_compute_breakdown(
+            prompt_tokens=s,
+            batch_size=b,
+            shared_backbone_params_b=1.43,
+            routed_expert_params_b=32.2,
+            num_experts=256,
+            experts_per_token=8,
+            logit_positions=0,
+        )
+    with pytest.raises(ValueError, match="logit_positions"):
+        calculate_prefill_compute_breakdown(
+            prompt_tokens=s,
+            batch_size=b,
+            shared_backbone_params_b=1.43,
+            routed_expert_params_b=32.2,
+            num_experts=256,
+            experts_per_token=8,
+            logit_positions=s + 1,
+        )
+
+
+def test_calculate_vision_encoding_stage():
+    """Validates the one-time vision encoding stage compute and weight traffic."""
+    from accelerator_sim.capacity import calculate_stored_weights_gb
+    from accelerator_sim.prefill import calculate_vision_encoding_stage
+
+    # Qwen 3.6 35B vision tower: 0.35B parameters, 576 tokens/seq, batch=2
+    res = calculate_vision_encoding_stage(
+        vision_params_b=0.35,
+        image_tokens_per_seq=576,
+        bits_per_param=4.5,
+        batch_size=2,
+    )
+    expected_traffic = calculate_stored_weights_gb(0.35, 4.5)
+    expected_tflop = (2.0 * 0.35 * 576 * 2) / 1000.0
+    assert pytest.approx(res.vision_weight_traffic_gb, rel=1e-5) == expected_traffic
+    assert pytest.approx(res.vision_compute_tflop, rel=1e-5) == expected_tflop
+    assert res.total_image_tokens == 576 * 2
+
+    # Zero vision params returns 0 traffic and 0 compute
+    res_zero = calculate_vision_encoding_stage(0.0, 576, 4.5, 2)
+    assert res_zero.vision_weight_traffic_gb == 0.0
+    assert res_zero.vision_compute_tflop == 0.0
+
+    # Invalid inputs
+    with pytest.raises(ValueError, match="cannot be negative"):
+        calculate_vision_encoding_stage(-1.0, 576, 4.5, 2)
+    with pytest.raises(ValueError, match="cannot be negative"):
+        calculate_vision_encoding_stage(0.35, -10, 4.5, 2)
+    with pytest.raises(ValueError, match="positive"):
+        calculate_vision_encoding_stage(0.35, 576, 4.5, 0)
+    with pytest.raises(ValueError, match="positive"):
+        calculate_vision_encoding_stage(0.35, 576, 0.0, 2)
 

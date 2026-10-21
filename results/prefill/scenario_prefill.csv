@@ -1,41 +1,41 @@
-system,workload,batch_size,context_len,active_compute_params_b,prefill_tflop,required_throughput_3s_tflops,prefill_status
-A48,dense-32b,1,8192,32.0,524.288,174.8,first_order_estimate
-A48,dense-32b,4,8192,32.0,2097.152,699.1,first_order_estimate
-A48,dense-32b,8,8192,32.0,4194.304,1398.1,first_order_estimate
-A48,dense-32b,16,8192,32.0,8388.608,2796.2,first_order_estimate
-A48,llama-3-8b,1,2048,8.03,32.891,11.0,first_order_estimate
-A48,llama-3-8b,4,2048,8.03,131.564,43.9,first_order_estimate
-A48,llama-3-8b,8,2048,8.03,263.127,87.7,first_order_estimate
-A48,llama-3-8b,16,2048,8.03,526.254,175.4,first_order_estimate
-A48,llama-3-70b,1,2048,70.6,289.178,96.4,first_order_estimate
-A48,llama-3-70b,4,2048,70.6,1156.71,385.6,first_order_estimate
-A48,llama-3-70b,8,2048,70.6,2313.421,771.1,first_order_estimate
-A48,llama-3-70b,16,2048,70.6,4626.842,1542.3,first_order_estimate
-A48,qwen-3.6-35b-a3b,1,8192,2.94,48.169,16.1,first_order_estimate
-A48,qwen-3.6-35b-a3b,4,8192,2.94,192.676,64.2,first_order_estimate
-A48,qwen-3.6-35b-a3b,8,8192,2.94,385.352,128.5,first_order_estimate
-A48,qwen-3.6-35b-a3b,16,8192,2.94,770.703,256.9,first_order_estimate
-A48,deepseek-v2-lite,1,2048,2.4,9.83,3.3,first_order_estimate
-A48,deepseek-v2-lite,4,2048,2.4,39.322,13.1,first_order_estimate
-A48,deepseek-v2-lite,8,2048,2.4,78.643,26.2,first_order_estimate
-A48,deepseek-v2-lite,16,2048,2.4,157.286,52.4,first_order_estimate
-A216,dense-32b,1,8192,32.0,524.288,174.8,first_order_estimate
-A216,dense-32b,4,8192,32.0,2097.152,699.1,first_order_estimate
-A216,dense-32b,8,8192,32.0,4194.304,1398.1,first_order_estimate
-A216,dense-32b,16,8192,32.0,8388.608,2796.2,first_order_estimate
-A216,llama-3-8b,1,2048,8.03,32.891,11.0,first_order_estimate
-A216,llama-3-8b,4,2048,8.03,131.564,43.9,first_order_estimate
-A216,llama-3-8b,8,2048,8.03,263.127,87.7,first_order_estimate
-A216,llama-3-8b,16,2048,8.03,526.254,175.4,first_order_estimate
-A216,llama-3-70b,1,2048,70.6,289.178,96.4,first_order_estimate
-A216,llama-3-70b,4,2048,70.6,1156.71,385.6,first_order_estimate
-A216,llama-3-70b,8,2048,70.6,2313.421,771.1,first_order_estimate
-A216,llama-3-70b,16,2048,70.6,4626.842,1542.3,first_order_estimate
-A216,qwen-3.6-35b-a3b,1,8192,2.94,48.169,16.1,first_order_estimate
-A216,qwen-3.6-35b-a3b,4,8192,2.94,192.676,64.2,first_order_estimate
-A216,qwen-3.6-35b-a3b,8,8192,2.94,385.352,128.5,first_order_estimate
-A216,qwen-3.6-35b-a3b,16,8192,2.94,770.703,256.9,first_order_estimate
-A216,deepseek-v2-lite,1,2048,2.4,9.83,3.3,first_order_estimate
-A216,deepseek-v2-lite,4,2048,2.4,39.322,13.1,first_order_estimate
-A216,deepseek-v2-lite,8,2048,2.4,78.643,26.2,first_order_estimate
-A216,deepseek-v2-lite,16,2048,2.4,157.286,52.4,first_order_estimate
+system,workload,batch_size,context_len,logit_positions,active_compute_params_b,shared_backbone_tflop,routed_expert_tflop,output_head_tflop,embedding_lookup_tflop,vision_tflop,prefill_tflop,required_throughput_3s_tflops,prefill_status
+A48,dense-32b,1,8192,8192,32.0,n/a,n/a,n/a,0.0,0.0,524.288,174.8,generic_first_order_estimate
+A48,dense-32b,4,8192,8192,32.0,n/a,n/a,n/a,0.0,0.0,2097.152,699.1,generic_first_order_estimate
+A48,dense-32b,8,8192,8192,32.0,n/a,n/a,n/a,0.0,0.0,4194.304,1398.1,generic_first_order_estimate
+A48,dense-32b,16,8192,8192,32.0,n/a,n/a,n/a,0.0,0.0,8388.608,2796.2,generic_first_order_estimate
+A48,llama-3-8b,1,2048,2048,8.03,n/a,n/a,n/a,0.0,0.0,32.891,11.0,generic_first_order_estimate
+A48,llama-3-8b,4,2048,2048,8.03,n/a,n/a,n/a,0.0,0.0,131.564,43.9,generic_first_order_estimate
+A48,llama-3-8b,8,2048,2048,8.03,n/a,n/a,n/a,0.0,0.0,263.127,87.7,generic_first_order_estimate
+A48,llama-3-8b,16,2048,2048,8.03,n/a,n/a,n/a,0.0,0.0,526.254,175.4,generic_first_order_estimate
+A48,llama-3-70b,1,2048,2048,70.6,n/a,n/a,n/a,0.0,0.0,289.178,96.4,generic_first_order_estimate
+A48,llama-3-70b,4,2048,2048,70.6,n/a,n/a,n/a,0.0,0.0,1156.71,385.6,generic_first_order_estimate
+A48,llama-3-70b,8,2048,2048,70.6,n/a,n/a,n/a,0.0,0.0,2313.421,771.1,generic_first_order_estimate
+A48,llama-3-70b,16,2048,2048,70.6,n/a,n/a,n/a,0.0,0.0,4626.842,1542.3,generic_first_order_estimate
+A48,qwen-3.6-35b-a3b,1,8192,1,2.94,23.429,16.486,0.001,0.0,0.0,39.917,13.3,detailed_breakdown_first_order_estimate
+A48,qwen-3.6-35b-a3b,4,8192,1,2.94,93.716,65.946,0.004,0.0,0.0,159.666,53.2,detailed_breakdown_first_order_estimate
+A48,qwen-3.6-35b-a3b,8,8192,1,2.94,187.433,131.891,0.008,0.0,0.0,319.332,106.4,detailed_breakdown_first_order_estimate
+A48,qwen-3.6-35b-a3b,16,8192,1,2.94,374.866,263.782,0.016,0.0,0.0,638.665,212.9,detailed_breakdown_first_order_estimate
+A48,deepseek-v2-lite,1,2048,2048,2.4,deferred,deferred,deferred,deferred,deferred,9.83,3.3,deferred (incomplete_mla_deferred)
+A48,deepseek-v2-lite,4,2048,2048,2.4,deferred,deferred,deferred,deferred,deferred,39.322,13.1,deferred (incomplete_mla_deferred)
+A48,deepseek-v2-lite,8,2048,2048,2.4,deferred,deferred,deferred,deferred,deferred,78.643,26.2,deferred (incomplete_mla_deferred)
+A48,deepseek-v2-lite,16,2048,2048,2.4,deferred,deferred,deferred,deferred,deferred,157.286,52.4,deferred (incomplete_mla_deferred)
+A216,dense-32b,1,8192,8192,32.0,n/a,n/a,n/a,0.0,0.0,524.288,174.8,generic_first_order_estimate
+A216,dense-32b,4,8192,8192,32.0,n/a,n/a,n/a,0.0,0.0,2097.152,699.1,generic_first_order_estimate
+A216,dense-32b,8,8192,8192,32.0,n/a,n/a,n/a,0.0,0.0,4194.304,1398.1,generic_first_order_estimate
+A216,dense-32b,16,8192,8192,32.0,n/a,n/a,n/a,0.0,0.0,8388.608,2796.2,generic_first_order_estimate
+A216,llama-3-8b,1,2048,2048,8.03,n/a,n/a,n/a,0.0,0.0,32.891,11.0,generic_first_order_estimate
+A216,llama-3-8b,4,2048,2048,8.03,n/a,n/a,n/a,0.0,0.0,131.564,43.9,generic_first_order_estimate
+A216,llama-3-8b,8,2048,2048,8.03,n/a,n/a,n/a,0.0,0.0,263.127,87.7,generic_first_order_estimate
+A216,llama-3-8b,16,2048,2048,8.03,n/a,n/a,n/a,0.0,0.0,526.254,175.4,generic_first_order_estimate
+A216,llama-3-70b,1,2048,2048,70.6,n/a,n/a,n/a,0.0,0.0,289.178,96.4,generic_first_order_estimate
+A216,llama-3-70b,4,2048,2048,70.6,n/a,n/a,n/a,0.0,0.0,1156.71,385.6,generic_first_order_estimate
+A216,llama-3-70b,8,2048,2048,70.6,n/a,n/a,n/a,0.0,0.0,2313.421,771.1,generic_first_order_estimate
+A216,llama-3-70b,16,2048,2048,70.6,n/a,n/a,n/a,0.0,0.0,4626.842,1542.3,generic_first_order_estimate
+A216,qwen-3.6-35b-a3b,1,8192,1,2.94,23.429,16.486,0.001,0.0,0.0,39.917,13.3,detailed_breakdown_first_order_estimate
+A216,qwen-3.6-35b-a3b,4,8192,1,2.94,93.716,65.946,0.004,0.0,0.0,159.666,53.2,detailed_breakdown_first_order_estimate
+A216,qwen-3.6-35b-a3b,8,8192,1,2.94,187.433,131.891,0.008,0.0,0.0,319.332,106.4,detailed_breakdown_first_order_estimate
+A216,qwen-3.6-35b-a3b,16,8192,1,2.94,374.866,263.782,0.016,0.0,0.0,638.665,212.9,detailed_breakdown_first_order_estimate
+A216,deepseek-v2-lite,1,2048,2048,2.4,deferred,deferred,deferred,deferred,deferred,9.83,3.3,deferred (incomplete_mla_deferred)
+A216,deepseek-v2-lite,4,2048,2048,2.4,deferred,deferred,deferred,deferred,deferred,39.322,13.1,deferred (incomplete_mla_deferred)
+A216,deepseek-v2-lite,8,2048,2048,2.4,deferred,deferred,deferred,deferred,deferred,78.643,26.2,deferred (incomplete_mla_deferred)
+A216,deepseek-v2-lite,16,2048,2048,2.4,deferred,deferred,deferred,deferred,deferred,157.286,52.4,deferred (incomplete_mla_deferred)

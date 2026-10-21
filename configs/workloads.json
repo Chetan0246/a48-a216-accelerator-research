@@ -87,6 +87,8 @@
     "output_head_params_b": 0.51,
     "vision_params_b": 0.35,
     "streamed_shared_params_b": 1.94,
+    "embedding_precision_bits": 16.0,
+    "mtp_params_b": 0.0,
     "is_complete": true,
     "status": "supported",
     "hybrid_attention": {
@@ -103,7 +105,7 @@
       "conv_channels": 8192,
       "conv_precision_bits": 16.0
     },
-    "notes": "Qwen 3.6 35B A3B sparse MoE with hybrid attention. 40 layers total: 30 layers Gated DeltaNet (linear attention with fixed recurrent state matrix 32 heads x 128 x 128 in FP32) and 10 layers standard Gated Attention (2 KV heads, head dim 256 in FP16). Parameter categories: 35.0B total stored weights = 32.2B routed (40 layers x 256 experts x 3.15M params/expert) + 2.8B non-routed shared pool (1.43B text backbone + 0.51B embedding table + 0.51B untied LM head + 0.35B vision tower / multimodal weights; published vision tower ~0.41B falls within 0.08B rounding tolerance). Active compute reconciliation: in text-only inference, active parameters are 2.94B ~ 3.0B (1.43B backbone + 1.01B routed + 0.51B output LM head), matching the official 'A3B' designation. Sparse input embedding lookup is an O(1) table gather (0 GEMM FLOPs), and the vision tower is conditional multimodal-only (0 FLOPs for text). Decode weight streaming: only 1.94B shared weights (1.43B backbone + 0.51B output head) plus active routed experts are streamed per step; the embedding table is accessed via sparse lookup and vision weights are strictly excluded from text decode streaming. All 35.0B parameters remain resident in accelerator memory (19.688 GB footprint)."
+    "notes": "Qwen 3.6 35B A3B sparse MoE with hybrid attention. 40 layers total: 30 layers Gated DeltaNet (linear attention with fixed recurrent state matrix 32 heads x 128 x 128 in FP32) and 10 layers standard Gated Attention (2 KV heads, head dim 256 in FP16). Parameter categories: 35.0B total stored weights = 32.2B routed (40 layers x 256 experts x 3.15M params/expert) + 2.8B non-routed shared pool (1.43B text backbone + 0.51B embedding table + 0.51B untied LM head + 0.35B vision tower / multimodal weights; published vision tower ~0.41B falls within 0.08B rounding tolerance). Active compute reconciliation: in text-only inference, active parameters are 2.94B ~ 3.0B (1.43B backbone + 1.01B routed + 0.51B output LM head), matching the official 'A3B' designation. Sparse input embedding lookup is an O(1) table gather (0 GEMM FLOPs, 16.0-bit precision), and the vision tower is conditional multimodal-only (0 FLOPs for text). Decode weight streaming: only 1.94B shared weights (1.43B backbone + 0.51B output head) plus active routed experts are streamed per step; the embedding table is accessed via sparse lookup and vision weights are strictly excluded from text decode streaming. All 35.0B parameters remain resident in accelerator memory (19.688 GB footprint). Multi-Token Prediction (MTP) scope: Qwen architecture specifies MTP auxiliary prediction heads (num_nextn_predict_layers: 1) for speculative drafting, but standard non-speculative autoregressive inference deployment does not load or execute MTP layers; mtp_params_b is explicitly set to 0.0 for this baseline scope."
   },
   "deepseek-v2-lite": {
     "name": "DeepSeek-V2-Lite",

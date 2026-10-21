@@ -249,6 +249,8 @@ def test_load_workloads_config_includes_qwen_35b():
     assert qwen.output_head_params_b == 0.51
     assert qwen.vision_params_b == 0.35
     assert qwen.effective_streamed_shared_params_b == 1.94
+    assert qwen.embedding_precision_bits == 16.0
+    assert qwen.mtp_params_b == 0.0
     assert qwen.num_experts == 256
     assert qwen.experts_per_token == 8
     assert qwen.is_complete is True
@@ -282,5 +284,31 @@ def test_capacity_non_finite_inputs():
             memory_capacity_gb=float("nan"),
             peak_bandwidth_tb_s=1.792,
             memory_bandwidth_gbs=1792.0,
+        )
+    with pytest.raises(ValueError, match="embedding_precision_bits must be positive"):
+        WorkloadConfig(
+            key="bad_emb_prec",
+            name="Bad Emb Prec",
+            total_parameters_b=7.0,
+            active_parameters_b=7.0,
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=32,
+            head_dim=128,
+            embedding_precision_bits=-16.0,
+        )
+    with pytest.raises(ValueError, match="mtp_params_b cannot be negative"):
+        WorkloadConfig(
+            key="bad_mtp",
+            name="Bad MTP",
+            total_parameters_b=7.0,
+            active_parameters_b=7.0,
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=32,
+            head_dim=128,
+            mtp_params_b=-1.0,
         )
 

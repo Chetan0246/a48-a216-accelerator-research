@@ -314,16 +314,20 @@ def test_moe_decode_weight_streaming_categories():
     expected_routed_gb = (expected_union * expert_size_b * 4.5) / 8.0
     assert pytest.approx(res_text.routed_weight_traffic_gb, rel=1e-4) == expected_routed_gb
 
-    # 6. Total card weight traffic sums the components without double counting
-    expected_card_weight_traffic = (
-        res_text.streamed_shared_traffic_gb
+    # 6. Disjoint additive columns sum without double counting
+    expected_disjoint_sum = (
+        res_text.backbone_weight_traffic_gb
+        + res_text.output_head_traffic_gb
         + res_text.routed_weight_traffic_gb
         + res_text.embedding_lookup_traffic_gb
         + res_text.vision_weight_traffic_gb
     )
-    assert pytest.approx(res_text.card_weight_traffic_gb, rel=1e-5) == expected_card_weight_traffic
+    assert pytest.approx(res_text.card_weight_traffic_gb, rel=1e-5) == expected_disjoint_sum
+    assert pytest.approx(res_text.streamed_shared_traffic_gb, rel=1e-5) == (
+        res_text.backbone_weight_traffic_gb + res_text.output_head_traffic_gb
+    )
 
-    # 7. In multimodal mode, vision tower weights are charged
+    # 7. In multimodal mode without explicit vision execution, vision tower weights are NOT charged on decode
     res_mm = evaluate_moe_decode(
         total_experts=256,
         resident_experts=256,
@@ -341,9 +345,34 @@ def test_moe_decode_weight_streaming_categories():
         vision_params_b=0.35,
         hidden_size=2048,
         mode="multimodal",
+        execute_vision_encoder=False,
     )
-    assert pytest.approx(res_mm.vision_weight_traffic_gb, rel=1e-4) == (0.35 * 4.5 / 8.0)
-    assert res_mm.card_weight_traffic_gb > res_text.card_weight_traffic_gb
+    # Regression test: switching to multimodal does not by itself stream vision weights during decode
+    assert res_mm.vision_weight_traffic_gb == 0.0
+    assert pytest.approx(res_mm.card_weight_traffic_gb, rel=1e-5) == res_text.card_weight_traffic_gb
+
+    # 8. Only when explicitly instructed (execute_vision_encoder=True) does the step charge vision weights
+    res_mm_exec = evaluate_moe_decode(
+        total_experts=256,
+        resident_experts=256,
+        top_k=8,
+        shared_params_b=2.8,
+        total_params_b=35.0,
+        bits_per_param=4.5,
+        batch_size=b,
+        kv_cache_per_sequence_gb=0.232,
+        card_sustained_bw_tb_s=1.4336,
+        streamed_shared_params_b=1.94,
+        shared_backbone_params_b=1.43,
+        embedding_params_b=0.51,
+        output_head_params_b=0.51,
+        vision_params_b=0.35,
+        hidden_size=2048,
+        mode="multimodal",
+        execute_vision_encoder=True,
+    )
+    assert pytest.approx(res_mm_exec.vision_weight_traffic_gb, rel=1e-4) == (0.35 * 4.5 / 8.0)
+    assert res_mm_exec.card_weight_traffic_gb > res_text.card_weight_traffic_gb
 
 
 def test_storage_constancy_and_parameter_conservation():
@@ -435,6 +464,82 @@ def test_storage_constancy_and_parameter_conservation():
             output_head_params_b=0.51,
             vision_params_b=0.35,
         )
+
+
+def test_moe_embedding_precision_and_disjoint_traffic():
+    """Validates configurable embedding precision and exact additive disjoint traffic."""
+    b = 8
+    hidden_dim = 4096
+
+    # Test with 32-bit embedding precision
+    res_fp32 = evaluate_moe_decode(
+        total_experts=64,
+        resident_experts=64,
+        top_k=4,
+        shared_params_b=4.0,
+        total_params_b=32.0,
+        bits_per_param=4.0,
+        batch_size=b,
+        kv_cache_per_sequence_gb=0.5,
+        card_sustained_bw_tb_s=1.0,
+        shared_backbone_params_b=2.0,
+        embedding_params_b=1.0,
+        output_head_params_b=1.0,
+        vision_params_b=0.0,
+        hidden_size=hidden_dim,
+        embedding_precision_bits=32.0,
+    )
+    expected_fp32_lookup_gb = (b * hidden_dim * (32.0 / 8.0)) / 1e9
+    assert pytest.approx(res_fp32.embedding_lookup_traffic_gb, rel=1e-5) == expected_fp32_lookup_gb
+    assert res_fp32.embedding_precision_bits == 32.0
+
+    # Test with 8-bit embedding precision
+    res_int8 = evaluate_moe_decode(
+        total_experts=64,
+        resident_experts=64,
+        top_k=4,
+        shared_params_b=4.0,
+        total_params_b=32.0,
+        bits_per_param=4.0,
+        batch_size=b,
+        kv_cache_per_sequence_gb=0.5,
+        card_sustained_bw_tb_s=1.0,
+        shared_backbone_params_b=2.0,
+        embedding_params_b=1.0,
+        output_head_params_b=1.0,
+        vision_params_b=0.0,
+        hidden_size=hidden_dim,
+        embedding_precision_bits=8.0,
+    )
+    expected_int8_lookup_gb = (b * hidden_dim * (8.0 / 8.0)) / 1e9
+    assert pytest.approx(res_int8.embedding_lookup_traffic_gb, rel=1e-5) == expected_int8_lookup_gb
+    assert res_int8.embedding_lookup_traffic_gb == expected_fp32_lookup_gb / 4.0
+
+    # Additive reconciliation
+    additive_sum = (
+        res_int8.backbone_weight_traffic_gb
+        + res_int8.output_head_traffic_gb
+        + res_int8.routed_weight_traffic_gb
+        + res_int8.embedding_lookup_traffic_gb
+        + res_int8.vision_weight_traffic_gb
+    )
+    assert pytest.approx(res_int8.card_weight_traffic_gb, rel=1e-6) == additive_sum
+
+    # Invalid embedding precision
+    with pytest.raises(ValueError, match="embedding_precision_bits"):
+        evaluate_moe_decode(
+            total_experts=64,
+            resident_experts=64,
+            top_k=4,
+            shared_params_b=4.0,
+            total_params_b=32.0,
+            bits_per_param=4.0,
+            batch_size=b,
+            kv_cache_per_sequence_gb=0.5,
+            card_sustained_bw_tb_s=1.0,
+            embedding_precision_bits=-16.0,
+        )
+
 
 
 

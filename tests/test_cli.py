@@ -91,3 +91,38 @@ def test_cli_qwen_preset_run(capsys):
     assert "1292.21 tokens/s" in captured
 
 
+def test_cli_phase_aware_and_prefill_breakdown(capsys):
+    """Tests CLI execution with explicit logit-positions, vision-encoder execution, and disjoint columns."""
+    # 1. Next-token TTFT prediction (logit_positions=1)
+    test_args_ttft = [
+        "--system", "A48",
+        "--workload", "qwen-3.6-35b-a3b",
+        "--batch", "4",
+        "--prompt-tokens", "8192",
+        "--logit-positions", "1",
+    ]
+    main(test_args_ttft)
+    captured_ttft = capsys.readouterr().out
+    assert "PREFILL COMPUTE ESTIMATE (Prompt: 8,192 tokens/seq, Batch: 4, Logit Positions: 1)" in captured_ttft
+    assert "Backbone Work:      93.716 TFLOP" in captured_ttft
+    assert "Routed Active Work: 65.946 TFLOP" in captured_ttft
+    assert "Output LM Head:     0.0041 TFLOP" in captured_ttft
+    assert "Embedding Lookup:   0.0 TFLOP" in captured_ttft
+    assert "159.666 TFLOP" in captured_ttft
+    assert "Disjoint Additive Components:" in captured_ttft
+    assert "Backbone:              0.804 GB/step" in captured_ttft
+    assert "Total Card Weights:    3.251 GB/step" in captured_ttft
+
+    # 2. Execution with explicit vision encoder enabled
+    test_args_vision = [
+        "--system", "A48",
+        "--workload", "qwen-3.6-35b-a3b",
+        "--batch", "4",
+        "--execute-vision-encoder",
+    ]
+    main(test_args_vision)
+    captured_vis = capsys.readouterr().out
+    assert "Vision Tower Weights:    0.197 GB/step (executed this step)" in captured_vis
+
+
+

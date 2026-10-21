@@ -121,11 +121,14 @@ class MoEOffloadResult:
     limiting_factor: str
     card_cache_traffic_gb: float = 0.0
     streamed_shared_params_b: float | None = None
+    backbone_weight_traffic_gb: float = 0.0
+    output_head_traffic_gb: float = 0.0
     streamed_shared_traffic_gb: float = 0.0
     routed_weight_traffic_gb: float = 0.0
-    output_head_traffic_gb: float = 0.0
     embedding_lookup_traffic_gb: float = 0.0
+    embedding_precision_bits: float = 16.0
     vision_weight_traffic_gb: float = 0.0
+    execute_vision_encoder: bool = False
     mode: str = "text_only"
     model_type: str = "first_order_analytical_bound"
     is_validated_predictor: bool = False
@@ -157,6 +160,8 @@ def evaluate_moe_decode(
     vision_params_b: float | None = None,
     hidden_size: int | None = None,
     mode: str = "text_only",
+    execute_vision_encoder: bool = False,
+    embedding_precision_bits: float = 16.0,
 ) -> MoEOffloadResult:
     """Evaluates MoE decode throughput ceiling with on-card and host offloading.
 
@@ -190,6 +195,8 @@ def evaluate_moe_decode(
         vision_params_b: Optional vision tower / multimodal parameters in billions.
         hidden_size: Optional transformer hidden dimension for embedding lookup traffic modeling.
         mode: Execution mode ('text_only' or 'multimodal').
+        execute_vision_encoder: Explicitly indicates whether the vision tower runs during this step (default False).
+        embedding_precision_bits: Explicit precision in bits used for embedding table row lookup (default 16.0).
 
     Returns:
         MoEOffloadResult with complete breakdown and ceilings for both execution bounds.
@@ -206,6 +213,7 @@ def evaluate_moe_decode(
         ("card_sustained_bw_tb_s", card_sustained_bw_tb_s),
         ("host_bw_tb_s", host_bw_tb_s),
         ("host_latency_ms", host_latency_ms),
+        ("embedding_precision_bits", embedding_precision_bits),
     ]:
         if not math.isfinite(val):
             raise ValueError(f"{name} must be a finite number, got {val}")
@@ -226,6 +234,8 @@ def evaluate_moe_decode(
         not math.isfinite(step_cache_traffic_gb) or step_cache_traffic_gb < 0
     ):
         raise ValueError("step_cache_traffic_gb must be a non-negative finite number")
+    if embedding_precision_bits <= 0:
+        raise ValueError("embedding_precision_bits must be positive")
     valid_modes = ("serialized", "overlapped")
     if offload_mode not in valid_modes:
         raise ValueError(f"offload_mode must be one of {valid_modes}, got '{offload_mode}'")
@@ -287,12 +297,19 @@ def evaluate_moe_decode(
     else:
         effective_streamed_shared_b = shared_params_b
 
+    # Mutually exclusive component calculations
+    if shared_backbone_params_b is not None:
+        backbone_weight_traffic_gb = calculate_stored_weights_gb(shared_backbone_params_b, bits_per_param)
+        output_head_traffic_gb = (
+            calculate_stored_weights_gb(output_head_params_b, bits_per_param)
+            if output_head_params_b is not None
+            else 0.0
+        )
+    else:
+        backbone_weight_traffic_gb = calculate_stored_weights_gb(effective_streamed_shared_b, bits_per_param)
+        output_head_traffic_gb = 0.0
+
     streamed_shared_traffic_gb = calculate_stored_weights_gb(effective_streamed_shared_b, bits_per_param)
-    output_head_traffic_gb = (
-        calculate_stored_weights_gb(output_head_params_b, bits_per_param)
-        if output_head_params_b is not None
-        else 0.0
-    )
 
     # Active routed expert traffic on card
     card_routed_params_b = expected_resident_union * expert_b
@@ -307,23 +324,24 @@ def evaluate_moe_decode(
         lookup_dim = 0
 
     if lookup_dim > 0 and (embedding_params_b is not None or streamed_shared_params_b is not None):
-        embedding_lookup_bytes = batch_size * lookup_dim * 2.0  # FP16/BF16 token vector (2 bytes)
+        bytes_per_dim = embedding_precision_bits / 8.0
+        embedding_lookup_bytes = batch_size * lookup_dim * bytes_per_dim
         embedding_lookup_traffic_gb = embedding_lookup_bytes / 1e9
     else:
         embedding_lookup_traffic_gb = 0.0
 
-    # Vision weights traffic: strictly 0 in text_only mode
-    if mode == "text_only":
-        vision_weight_traffic_gb = 0.0
+    # Vision weights traffic:
+    # Autoregressive decoding generates tokens from KV cache and text backbone;
+    # it does NOT run the vision encoder tower unless explicitly requested for that step.
+    if execute_vision_encoder and vision_params_b is not None and vision_params_b > 0:
+        vision_weight_traffic_gb = calculate_stored_weights_gb(vision_params_b, bits_per_param)
     else:
-        vision_weight_traffic_gb = (
-            calculate_stored_weights_gb(vision_params_b, bits_per_param)
-            if vision_params_b is not None
-            else 0.0
-        )
+        vision_weight_traffic_gb = 0.0
 
+    # Total card weight traffic is the exact sum of the mutually exclusive components:
     card_weight_traffic_gb = (
-        streamed_shared_traffic_gb
+        backbone_weight_traffic_gb
+        + output_head_traffic_gb
         + routed_weight_traffic_gb
         + embedding_lookup_traffic_gb
         + vision_weight_traffic_gb
@@ -402,11 +420,14 @@ def evaluate_moe_decode(
         limiting_factor=limiting,
         card_cache_traffic_gb=card_cache_traffic_gb,
         streamed_shared_params_b=effective_streamed_shared_b,
+        backbone_weight_traffic_gb=backbone_weight_traffic_gb,
+        output_head_traffic_gb=output_head_traffic_gb,
         streamed_shared_traffic_gb=streamed_shared_traffic_gb,
         routed_weight_traffic_gb=routed_weight_traffic_gb,
-        output_head_traffic_gb=output_head_traffic_gb,
         embedding_lookup_traffic_gb=embedding_lookup_traffic_gb,
+        embedding_precision_bits=embedding_precision_bits,
         vision_weight_traffic_gb=vision_weight_traffic_gb,
+        execute_vision_encoder=execute_vision_encoder,
         mode=mode,
         model_type="first_order_analytical_bound",
         is_validated_predictor=False,

@@ -28,6 +28,7 @@ from accelerator_sim.models import (
 )
 from accelerator_sim.moe import evaluate_moe_decode
 from accelerator_sim.prefill import (
+    calculate_prefill_compute_breakdown,
     calculate_prefill_tflop,
     calculate_required_prefill_throughput,
 )
@@ -103,12 +104,13 @@ def main():
                         "batch_size": b,
                         "stored_weights_gb": weights_gb,
                         "expected_active_experts": "deferred",
-                        "card_weight_traffic_gb": "deferred",
-                        "streamed_shared_traffic_gb": "deferred",
-                        "routed_weight_traffic_gb": "deferred",
+                        "backbone_weight_traffic_gb": "deferred",
                         "output_head_traffic_gb": "deferred",
+                        "routed_weight_traffic_gb": "deferred",
                         "embedding_lookup_traffic_gb": "deferred",
                         "vision_weight_traffic_gb": "deferred",
+                        "card_weight_traffic_gb": "deferred",
+                        "streamed_shared_traffic_gb": "deferred",
                         "card_cache_traffic_gb": "deferred",
                         "total_step_traffic_gb": "deferred",
                         "aggregate_tps": "deferred",
@@ -127,10 +129,16 @@ def main():
                         "workload": wl_name,
                         "batch_size": b,
                         "context_len": context_len,
+                        "logit_positions": context_len,
                         "active_compute_params_b": round(active_params_b, 2),
+                        "shared_backbone_tflop": "deferred",
+                        "routed_expert_tflop": "deferred",
+                        "output_head_tflop": "deferred",
+                        "embedding_lookup_tflop": "deferred",
+                        "vision_tflop": "deferred",
                         "prefill_tflop": round(p_tflop, 3),
                         "required_throughput_3s_tflops": round(req_tflops, 1),
-                        "prefill_status": "first_order_estimate",
+                        "prefill_status": f"deferred ({wl.status})",
                     })
                 continue
 
@@ -177,20 +185,59 @@ def main():
                         "cache_status": "supported_hybrid_modeled",
                     })
 
-                    # Prefill
-                    active_params_b = wl.active_parameters_b
-                    p_tflop = calculate_prefill_tflop(active_params_b, context_len, b)
-                    req_tflops = calculate_required_prefill_throughput(p_tflop, target_ttft_seconds=3.0)
-                    prefill_records.append({
-                        "system": sys_name,
-                        "workload": wl_name,
-                        "batch_size": b,
-                        "context_len": context_len,
-                        "active_compute_params_b": round(active_params_b, 2),
-                        "prefill_tflop": round(p_tflop, 3),
-                        "required_throughput_3s_tflops": round(req_tflops, 1),
-                        "prefill_status": "first_order_estimate",
-                    })
+                    # Prefill (Detailed breakdown for Qwen)
+                    if wl.shared_backbone_params_b is not None:
+                        breakdown = calculate_prefill_compute_breakdown(
+                            prompt_tokens=context_len,
+                            batch_size=b,
+                            shared_backbone_params_b=wl.shared_backbone_params_b,
+                            routed_expert_params_b=wl.routed_expert_params_b,
+                            num_experts=wl.num_experts,
+                            experts_per_token=wl.experts_per_token,
+                            output_head_params_b=wl.output_head_params_b or 0.0,
+                            embedding_params_b=wl.embedding_params_b or 0.0,
+                            vision_params_b=wl.vision_params_b or 0.0,
+                            mode="text_only",
+                            logit_positions=1,  # TTFT first-token generation
+                        )
+                        p_tflop = breakdown.total_tflop
+                        req_tflops = calculate_required_prefill_throughput(p_tflop, target_ttft_seconds=3.0)
+                        prefill_records.append({
+                            "system": sys_name,
+                            "workload": wl_name,
+                            "batch_size": b,
+                            "context_len": context_len,
+                            "logit_positions": 1,
+                            "active_compute_params_b": round(wl.active_parameters_b, 2),
+                            "shared_backbone_tflop": round(breakdown.shared_backbone_tflop, 3),
+                            "routed_expert_tflop": round(breakdown.routed_expert_tflop, 3),
+                            "output_head_tflop": round(breakdown.output_head_tflop, 3),
+                            "embedding_lookup_tflop": 0.0,
+                            "vision_tflop": 0.0,
+                            "prefill_tflop": round(p_tflop, 3),
+                            "required_throughput_3s_tflops": round(req_tflops, 1),
+                            "prefill_status": "detailed_breakdown_first_order_estimate",
+                        })
+                    else:
+                        active_params_b = wl.active_parameters_b
+                        p_tflop = calculate_prefill_tflop(active_params_b, context_len, b)
+                        req_tflops = calculate_required_prefill_throughput(p_tflop, target_ttft_seconds=3.0)
+                        prefill_records.append({
+                            "system": sys_name,
+                            "workload": wl_name,
+                            "batch_size": b,
+                            "context_len": context_len,
+                            "logit_positions": context_len,
+                            "active_compute_params_b": round(active_params_b, 2),
+                            "shared_backbone_tflop": "n/a",
+                            "routed_expert_tflop": "n/a",
+                            "output_head_tflop": "n/a",
+                            "embedding_lookup_tflop": 0.0,
+                            "vision_tflop": 0.0,
+                            "prefill_tflop": round(p_tflop, 3),
+                            "required_throughput_3s_tflops": round(req_tflops, 1),
+                            "prefill_status": "generic_first_order_estimate",
+                        })
 
                     # Decode (Qwen is MoE)
                     moe_res = evaluate_moe_decode(
@@ -212,6 +259,8 @@ def main():
                         vision_params_b=wl.vision_params_b,
                         hidden_size=wl.hidden_size,
                         mode="text_only",
+                        execute_vision_encoder=False,
+                        embedding_precision_bits=wl.embedding_precision_bits,
                     )
                     decode_records.append({
                         "system": sys_name,
@@ -219,12 +268,13 @@ def main():
                         "batch_size": b,
                         "stored_weights_gb": round(cap_res.weights_gb, 3),
                         "expected_active_experts": round(moe_res.expected_total_union, 4),
-                        "card_weight_traffic_gb": round(moe_res.card_weight_traffic_gb, 3),
-                        "streamed_shared_traffic_gb": round(moe_res.streamed_shared_traffic_gb, 3),
-                        "routed_weight_traffic_gb": round(moe_res.routed_weight_traffic_gb, 3),
+                        "backbone_weight_traffic_gb": round(moe_res.backbone_weight_traffic_gb, 3),
                         "output_head_traffic_gb": round(moe_res.output_head_traffic_gb, 3),
+                        "routed_weight_traffic_gb": round(moe_res.routed_weight_traffic_gb, 3),
                         "embedding_lookup_traffic_gb": round(moe_res.embedding_lookup_traffic_gb, 6),
                         "vision_weight_traffic_gb": round(moe_res.vision_weight_traffic_gb, 3),
+                        "card_weight_traffic_gb": round(moe_res.card_weight_traffic_gb, 3),
+                        "streamed_shared_traffic_gb": round(moe_res.streamed_shared_traffic_gb, 3),
                         "card_cache_traffic_gb": round(moe_res.card_cache_traffic_gb, 3),
                         "total_step_traffic_gb": round(moe_res.card_weight_traffic_gb + moe_res.card_cache_traffic_gb, 3),
                         "aggregate_tps": round(moe_res.combined_aggregate_tps, 2),
@@ -280,19 +330,58 @@ def main():
                 })
 
                 # Prefill
-                active_params_b = wl.active_parameters_b
-                p_tflop = calculate_prefill_tflop(active_params_b, context_len, b)
-                req_tflops = calculate_required_prefill_throughput(p_tflop, target_ttft_seconds=3.0)
-                prefill_records.append({
-                    "system": sys_name,
-                    "workload": wl_name,
-                    "batch_size": b,
-                    "context_len": context_len,
-                    "active_compute_params_b": round(active_params_b, 2),
-                    "prefill_tflop": round(p_tflop, 3),
-                    "required_throughput_3s_tflops": round(req_tflops, 1),
-                    "prefill_status": "first_order_estimate",
-                })
+                if wl.shared_backbone_params_b is not None and is_moe:
+                    breakdown = calculate_prefill_compute_breakdown(
+                        prompt_tokens=context_len,
+                        batch_size=b,
+                        shared_backbone_params_b=wl.shared_backbone_params_b,
+                        routed_expert_params_b=wl.routed_expert_params_b,
+                        num_experts=wl.num_experts,
+                        experts_per_token=wl.experts_per_token,
+                        output_head_params_b=wl.output_head_params_b or 0.0,
+                        embedding_params_b=wl.embedding_params_b or 0.0,
+                        vision_params_b=wl.vision_params_b or 0.0,
+                        mode="text_only",
+                        logit_positions=1,
+                    )
+                    p_tflop = breakdown.total_tflop
+                    req_tflops = calculate_required_prefill_throughput(p_tflop, target_ttft_seconds=3.0)
+                    prefill_records.append({
+                        "system": sys_name,
+                        "workload": wl_name,
+                        "batch_size": b,
+                        "context_len": context_len,
+                        "logit_positions": 1,
+                        "active_compute_params_b": round(wl.active_parameters_b, 2),
+                        "shared_backbone_tflop": round(breakdown.shared_backbone_tflop, 3),
+                        "routed_expert_tflop": round(breakdown.routed_expert_tflop, 3),
+                        "output_head_tflop": round(breakdown.output_head_tflop, 3),
+                        "embedding_lookup_tflop": 0.0,
+                        "vision_tflop": 0.0,
+                        "prefill_tflop": round(p_tflop, 3),
+                        "required_throughput_3s_tflops": round(req_tflops, 1),
+                        "prefill_status": "detailed_breakdown_first_order_estimate",
+                    })
+                else:
+                    active_params_b = wl.active_parameters_b
+                    p_tflop = calculate_prefill_tflop(active_params_b, context_len, b)
+                    req_tflops = calculate_required_prefill_throughput(p_tflop, target_ttft_seconds=3.0)
+                    prefill_records.append({
+                        "system": sys_name,
+                        "workload": wl_name,
+                        "batch_size": b,
+                        "context_len": context_len,
+                        "logit_positions": context_len,
+                        "active_compute_params_b": round(active_params_b, 2),
+                        "shared_backbone_tflop": "n/a",
+                        "routed_expert_tflop": "n/a",
+                        "output_head_tflop": "n/a",
+                        "embedding_lookup_tflop": 0.0,
+                        "vision_tflop": 0.0,
+                        "prefill_tflop": round(p_tflop, 3),
+                        "required_throughput_3s_tflops": round(req_tflops, 1),
+                        "prefill_status": "generic_first_order_estimate",
+                    })
 
                 # Decode
                 if is_moe:
@@ -314,6 +403,8 @@ def main():
                         vision_params_b=wl.vision_params_b,
                         hidden_size=wl.hidden_size,
                         mode="text_only",
+                        execute_vision_encoder=False,
+                        embedding_precision_bits=wl.embedding_precision_bits,
                     )
                     decode_records.append({
                         "system": sys_name,
@@ -321,12 +412,13 @@ def main():
                         "batch_size": b,
                         "stored_weights_gb": round(cap_res.weights_gb, 3),
                         "expected_active_experts": round(moe_res.expected_total_union, 4),
-                        "card_weight_traffic_gb": round(moe_res.card_weight_traffic_gb, 3),
-                        "streamed_shared_traffic_gb": round(moe_res.streamed_shared_traffic_gb, 3),
-                        "routed_weight_traffic_gb": round(moe_res.routed_weight_traffic_gb, 3),
+                        "backbone_weight_traffic_gb": round(moe_res.backbone_weight_traffic_gb, 3),
                         "output_head_traffic_gb": round(moe_res.output_head_traffic_gb, 3),
+                        "routed_weight_traffic_gb": round(moe_res.routed_weight_traffic_gb, 3),
                         "embedding_lookup_traffic_gb": round(moe_res.embedding_lookup_traffic_gb, 6),
                         "vision_weight_traffic_gb": round(moe_res.vision_weight_traffic_gb, 3),
+                        "card_weight_traffic_gb": round(moe_res.card_weight_traffic_gb, 3),
+                        "streamed_shared_traffic_gb": round(moe_res.streamed_shared_traffic_gb, 3),
                         "card_cache_traffic_gb": round(moe_res.card_cache_traffic_gb, 3),
                         "total_step_traffic_gb": round(moe_res.card_weight_traffic_gb + moe_res.card_cache_traffic_gb, 3),
                         "aggregate_tps": round(moe_res.combined_aggregate_tps, 2),
@@ -349,12 +441,13 @@ def main():
                         "batch_size": b,
                         "stored_weights_gb": round(cap_res.weights_gb, 3),
                         "expected_active_experts": 1.0,
-                        "card_weight_traffic_gb": round(dec_res.weight_traffic_gb, 3),
-                        "streamed_shared_traffic_gb": round(dec_res.weight_traffic_gb, 3),
-                        "routed_weight_traffic_gb": 0.0,
+                        "backbone_weight_traffic_gb": round(dec_res.weight_traffic_gb, 3),
                         "output_head_traffic_gb": 0.0,
+                        "routed_weight_traffic_gb": 0.0,
                         "embedding_lookup_traffic_gb": 0.0,
                         "vision_weight_traffic_gb": 0.0,
+                        "card_weight_traffic_gb": round(dec_res.weight_traffic_gb, 3),
+                        "streamed_shared_traffic_gb": round(dec_res.weight_traffic_gb, 3),
                         "card_cache_traffic_gb": round(dec_res.card_cache_traffic_gb, 3),
                         "total_step_traffic_gb": round(dec_res.total_step_traffic_gb, 3),
                         "aggregate_tps": round(dec_res.aggregate_tps, 2),

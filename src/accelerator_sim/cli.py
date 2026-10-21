@@ -20,6 +20,7 @@ try:
     )
     from .moe import evaluate_moe_decode
     from .prefill import (
+        calculate_prefill_compute_breakdown,
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
     )
@@ -42,6 +43,7 @@ except (ImportError, ValueError):
     )
     from accelerator_sim.moe import evaluate_moe_decode
     from accelerator_sim.prefill import (
+        calculate_prefill_compute_breakdown,
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
     )
@@ -92,6 +94,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--runtime-reserve-gb", type=float, default=4.0, help="Reserved memory in decimal GB")
     p.add_argument("--effective-bandwidth-fraction", type=float, default=0.8, help="Sustained bandwidth efficiency")
     p.add_argument("--prompt-tokens", type=int, default=8192, help="Prompt token count per sequence")
+    p.add_argument(
+        "--logit-positions",
+        type=int,
+        default=1,
+        help="Number of prompt positions to compute logits for in prefill (default: 1 for next-token TTFT prediction matching Qwen logits_to_keep=1)",
+    )
+    p.add_argument(
+        "--embedding-precision-bits",
+        type=float,
+        default=None,
+        help="Embedding lookup precision in bits (default: from workload config or 16.0)",
+    )
+    p.add_argument(
+        "--execute-vision-encoder",
+        action="store_true",
+        default=False,
+        help="Include vision encoder tower execution during this step",
+    )
+    p.add_argument(
+        "--mode",
+        choices=("text_only", "multimodal"),
+        default="text_only",
+        help="Inference mode (text_only or multimodal)",
+    )
     p.add_argument("--ttft-seconds", type=float, default=3.0, help="Target prefill time budget in seconds")
     p.add_argument("--peak-fp16-tflops", type=float, default=0.0, help="Peak FP16 TFLOP/s (0 disables ceiling)")
     p.add_argument("--compute-utilization", type=float, default=0.5, help="Effective prefill compute utilization")
@@ -114,6 +140,7 @@ def main(argv=None):
     sys_cfg = systems_data[matching_keys[0]]
 
     # Workload preset override if provided
+    wl = None
     params_b = args.params_b
     model_type = args.model
     layers = args.layers
@@ -230,6 +257,11 @@ def main(argv=None):
 
         resident = experts if args.resident_experts is None else args.resident_experts
         streamed_shared = wl.effective_streamed_shared_params_b if (args.workload and wl is not None) else shared_params_b
+        embedding_prec = (
+            args.embedding_precision_bits
+            if args.embedding_precision_bits is not None
+            else (wl.embedding_precision_bits if (args.workload and wl is not None and wl.embedding_precision_bits is not None) else 16.0)
+        )
         moe_res = evaluate_moe_decode(
             total_experts=experts,
             resident_experts=resident,
@@ -250,7 +282,9 @@ def main(argv=None):
             output_head_params_b=wl.output_head_params_b if (args.workload and wl is not None) else None,
             vision_params_b=wl.vision_params_b if (args.workload and wl is not None) else None,
             hidden_size=wl.hidden_size if (args.workload and wl is not None) else None,
-            mode="text_only",
+            mode=args.mode,
+            execute_vision_encoder=args.execute_vision_encoder,
+            embedding_precision_bits=embedding_prec,
         )
 
         print(f"\n[2] MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE {params_b:.1f}B)")
@@ -267,8 +301,18 @@ def main(argv=None):
         if moe_res.output_head_traffic_gb > 0:
             print(f"      (incl. Output LM Head:   {moe_res.output_head_traffic_gb:.3f} GB/step)")
         print(f"    * Active Routed Experts:   {moe_res.routed_weight_traffic_gb:.3f} GB/step ({moe_res.expected_resident_union:.4f} unique resident experts)")
-        print(f"    * Embedding Lookup:        {moe_res.embedding_lookup_traffic_gb:.6f} GB/step (sparse per-token index gather)")
-        print(f"    * Vision Tower Weights:    {moe_res.vision_weight_traffic_gb:.3f} GB/step (excluded in text-only mode)")
+        print(f"    * Embedding Lookup:        {moe_res.embedding_lookup_traffic_gb:.6f} GB/step (sparse per-token index gather at {moe_res.embedding_precision_bits:g}-bit)")
+        if moe_res.vision_weight_traffic_gb > 0:
+            print(f"    * Vision Tower Weights:    {moe_res.vision_weight_traffic_gb:.3f} GB/step (executed this step)")
+        else:
+            print(f"    * Vision Tower Weights:    {moe_res.vision_weight_traffic_gb:.3f} GB/step (excluded in text-only mode)")
+        print("    * Disjoint Additive Components:")
+        print(f"        Backbone:              {moe_res.backbone_weight_traffic_gb:.3f} GB/step")
+        print(f"        Output LM Head:        {moe_res.output_head_traffic_gb:.3f} GB/step")
+        print(f"        Routed Weights:        {moe_res.routed_weight_traffic_gb:.3f} GB/step")
+        print(f"        Embedding Lookup:      {moe_res.embedding_lookup_traffic_gb:.6f} GB/step")
+        print(f"        Vision Weights:        {moe_res.vision_weight_traffic_gb:.3f} GB/step")
+        print(f"        Total Card Weights:    {moe_res.card_weight_traffic_gb:.3f} GB/step")
         print("  - Cache Step Traffic Breakdown:")
         print(f"    * Attention KV Read:   {h_breakdown.step_attn_kv_read_gb:.3f} GB/step (O(S) context history)")
         print(f"    * Attention KV Write:  {h_breakdown.step_attn_kv_write_gb:.4f} GB/step (new token KV)")
@@ -287,14 +331,43 @@ def main(argv=None):
         print(f"  - Selected Bound ({moe_res.offload_mode}): {moe_res.combined_aggregate_tps:.2f} tokens/s ({moe_res.per_sequence_tps:.2f} tok/s/seq)")
         print(f"  - Primary Limiter:      {moe_res.limiting_factor}")
 
-        active_params = wl.active_parameters_b if (args.workload and wl is not None) else (shared_params_b + top_k * (routed_params_b / float(experts)))
-        prefill_tflop = calculate_prefill_tflop(active_params, args.prompt_tokens, args.batch)
-        req_tflops = calculate_required_prefill_throughput(prefill_tflop, args.ttft_seconds)
-        print(f"\n[4] PREFILL COMPUTE ESTIMATE (Prompt: {args.prompt_tokens:,} tokens/seq, Batch: {args.batch})")
-        print(f"  - Active Compute Params:{active_params:.2f}B (reconciled text forward pass)")
-        print(f"  - Dense-equivalent Work:{prefill_tflop:.3f} TFLOP (2 * P_active * S * B)")
-        print(f"  - Target TTFT Budget:   {args.ttft_seconds:.2f} s")
-        print(f"  - Required Throughput:  {req_tflops:.1f} effective TFLOP/s")
+        if wl is not None and wl.shared_backbone_params_b is not None:
+            prefill_breakdown = calculate_prefill_compute_breakdown(
+                prompt_tokens=args.prompt_tokens,
+                batch_size=args.batch,
+                shared_backbone_params_b=wl.shared_backbone_params_b,
+                routed_expert_params_b=wl.routed_expert_params_b,
+                num_experts=experts,
+                experts_per_token=top_k,
+                output_head_params_b=wl.output_head_params_b or 0.0,
+                embedding_params_b=wl.embedding_params_b or 0.0,
+                vision_params_b=wl.vision_params_b or 0.0,
+                mode=args.mode,
+                logit_positions=args.logit_positions,
+            )
+            prefill_tflop = prefill_breakdown.total_tflop
+            req_tflops = calculate_required_prefill_throughput(prefill_tflop, args.ttft_seconds)
+            print(f"\n[4] PREFILL COMPUTE ESTIMATE (Prompt: {args.prompt_tokens:,} tokens/seq, Batch: {args.batch}, Logit Positions: {args.logit_positions})")
+            print(f"  - Active Compute Params:{prefill_breakdown.active_compute_params_b:.2f}B (reconciled text forward pass)")
+            print(f"  - Dense-equivalent Work:{prefill_tflop:.3f} TFLOP (Detailed breakdown across categories)")
+            print(f"    * Backbone Work:      {prefill_breakdown.shared_backbone_tflop:.3f} TFLOP (2 * P_backbone * S * B)")
+            print(f"    * Routed Active Work: {prefill_breakdown.routed_expert_tflop:.3f} TFLOP (2 * P_routed_active * S * B)")
+            print(f"    * Output LM Head:     {prefill_breakdown.output_head_tflop:.4f} TFLOP (2 * P_head * {args.logit_positions} * B; logits_to_keep={args.logit_positions})")
+            print(f"    * Embedding Lookup:   {prefill_breakdown.embedding_lookup_tflop:.1f} TFLOP (sparse gather, 0 GEMM FLOPs)")
+            if prefill_breakdown.vision_tflop > 0:
+                print(f"    * Vision Tower:       {prefill_breakdown.vision_tflop:.3f} TFLOP")
+            print(f"  - Target TTFT Budget:   {args.ttft_seconds:.2f} s")
+            print(f"  - Required Throughput:  {req_tflops:.1f} effective TFLOP/s")
+        else:
+            effective_routed = routed_params_b if routed_params_b is not None else (params_b - shared_params_b)
+            active_params = wl.active_parameters_b if (args.workload and wl is not None) else (shared_params_b + top_k * (effective_routed / float(experts)))
+            prefill_tflop = calculate_prefill_tflop(active_params, args.prompt_tokens, args.batch)
+            req_tflops = calculate_required_prefill_throughput(prefill_tflop, args.ttft_seconds)
+            print(f"\n[4] PREFILL COMPUTE ESTIMATE (Prompt: {args.prompt_tokens:,} tokens/seq, Batch: {args.batch})")
+            print(f"  - Active Compute Params:{active_params:.2f}B (reconciled text forward pass)")
+            print(f"  - Dense-equivalent Work:{prefill_tflop:.3f} TFLOP (2 * P_active * S * B)")
+            print(f"  - Target TTFT Budget:   {args.ttft_seconds:.2f} s")
+            print(f"  - Required Throughput:  {req_tflops:.1f} effective TFLOP/s")
 
         print("\n" + "=" * 70)
         return
@@ -365,6 +438,11 @@ def main(argv=None):
         # MoE Architecture
         resident = experts if args.resident_experts is None else args.resident_experts
         streamed_shared = wl.effective_streamed_shared_params_b if (args.workload and wl is not None) else shared_params_b
+        embedding_prec = (
+            args.embedding_precision_bits
+            if args.embedding_precision_bits is not None
+            else (wl.embedding_precision_bits if (args.workload and wl is not None and wl.embedding_precision_bits is not None) else 16.0)
+        )
         moe_res = evaluate_moe_decode(
             total_experts=experts,
             resident_experts=resident,
@@ -384,7 +462,9 @@ def main(argv=None):
             output_head_params_b=wl.output_head_params_b if (args.workload and wl is not None) else None,
             vision_params_b=wl.vision_params_b if (args.workload and wl is not None) else None,
             hidden_size=wl.hidden_size if (args.workload and wl is not None) else None,
-            mode="text_only",
+            mode=args.mode,
+            execute_vision_encoder=args.execute_vision_encoder,
+            embedding_precision_bits=embedding_prec,
         )
         print(f"\n[1] MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE {params_b:.1f}B)")
         print(f"  - Routed Experts:       {experts} total, top-{top_k} active/token")
@@ -405,6 +485,39 @@ def main(argv=None):
         print(f"  - Overlapped Bound TPS: {moe_res.overlapped_aggregate_tps:.2f} tokens/s")
         print(f"  - Selected Bound ({moe_res.offload_mode}): {moe_res.combined_aggregate_tps:.2f} tokens/s ({moe_res.per_sequence_tps:.2f} tok/s/seq)")
         print(f"  - Primary Limiter:      {moe_res.limiting_factor}")
+
+        # Prefill Evaluation
+        if wl is not None and wl.shared_backbone_params_b is not None:
+            prefill_breakdown = calculate_prefill_compute_breakdown(
+                prompt_tokens=args.prompt_tokens,
+                batch_size=args.batch,
+                shared_backbone_params_b=wl.shared_backbone_params_b,
+                routed_expert_params_b=wl.routed_expert_params_b,
+                num_experts=experts,
+                experts_per_token=top_k,
+                output_head_params_b=wl.output_head_params_b or 0.0,
+                embedding_params_b=wl.embedding_params_b or 0.0,
+                vision_params_b=wl.vision_params_b or 0.0,
+                mode=args.mode,
+                logit_positions=args.logit_positions,
+            )
+            prefill_tflop = prefill_breakdown.total_tflop
+            req_tflops = calculate_required_prefill_throughput(prefill_tflop, args.ttft_seconds)
+            print(f"\n[3] PREFILL COMPUTE ESTIMATE (Prompt: {args.prompt_tokens:,} tokens/seq, Batch: {args.batch}, Logit Positions: {args.logit_positions})")
+            print(f"  - Active Compute Params:{prefill_breakdown.active_compute_params_b:.2f}B (reconciled text forward pass)")
+            print(f"  - Dense-equivalent Work:{prefill_tflop:.3f} TFLOP (Detailed breakdown across categories)")
+            print(f"  - Target TTFT Budget:   {args.ttft_seconds:.2f} s")
+            print(f"  - Required Throughput:  {req_tflops:.1f} effective TFLOP/s")
+        else:
+            effective_routed = routed_params_b if routed_params_b is not None else (params_b - shared_params_b)
+            active_params = wl.active_parameters_b if (args.workload and wl is not None) else (shared_params_b + top_k * (effective_routed / float(experts)))
+            prefill_tflop = calculate_prefill_tflop(active_params, args.prompt_tokens, args.batch)
+            req_tflops = calculate_required_prefill_throughput(prefill_tflop, args.ttft_seconds)
+            print(f"\n[3] PREFILL COMPUTE ESTIMATE (Prompt: {args.prompt_tokens:,} tokens/seq, Batch: {args.batch})")
+            print(f"  - Active Compute Params:{active_params:.2f}B")
+            print(f"  - Dense-equivalent Work:{prefill_tflop:.3f} TFLOP (2 * P_active * S * B)")
+            print(f"  - Target TTFT Budget:   {args.ttft_seconds:.2f} s")
+            print(f"  - Required Throughput:  {req_tflops:.1f} effective TFLOP/s")
 
     print("\n" + "=" * 70)
 

@@ -83,6 +83,8 @@ class WorkloadConfig:
     output_head_params_b: float | None = None
     vision_params_b: float | None = None
     streamed_shared_params_b: float | None = None
+    embedding_precision_bits: float = 16.0
+    mtp_params_b: float = 0.0
     is_complete: bool = True
     status: str = "supported"
     hybrid_attention: dict[str, Any] | None = None
@@ -107,6 +109,8 @@ class WorkloadConfig:
             "total_parameters_b": self.total_parameters_b,
             "active_parameters_b": self.active_parameters_b,
             "bits_per_param": self.bits_per_param,
+            "embedding_precision_bits": self.embedding_precision_bits,
+            "mtp_params_b": self.mtp_params_b,
         }
         for name, val in numeric_fields.items():
             if not math.isfinite(val):
@@ -126,6 +130,10 @@ class WorkloadConfig:
             raise ValueError("vocab_size must be positive")
         if self.bits_per_param <= 0:
             raise ValueError("bits_per_param must be positive")
+        if self.embedding_precision_bits <= 0:
+            raise ValueError("embedding_precision_bits must be positive")
+        if self.mtp_params_b < 0:
+            raise ValueError("mtp_params_b cannot be negative")
 
         if self.shared_params_b is not None:
             if not math.isfinite(self.shared_params_b):
