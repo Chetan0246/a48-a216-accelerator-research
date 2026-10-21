@@ -541,5 +541,60 @@ def test_moe_embedding_precision_and_disjoint_traffic():
         )
 
 
+def test_moe_decode_with_routed_and_mtp_params():
+    """Verify evaluate_moe_decode handles explicit routed and mtp parameters properly."""
+    res = evaluate_moe_decode(
+        total_experts=256,
+        resident_experts=256,
+        top_k=8,
+        shared_params_b=2.8,
+        total_params_b=35.84,
+        routed_params_b=32.2,
+        mtp_params_b=0.84,
+        bits_per_param=4.5,
+        batch_size=1,
+        kv_cache_per_sequence_gb=0.168,
+        card_sustained_bw_tb_s=1.434,
+        streamed_shared_params_b=1.94,
+    )
+    # Routed weight traffic should be based on 32.2B / 256 * 8 = 1.00625B active weights
+    # 1.00625 * 4.5 / 8 = 0.566015625 GB
+    expected_routed_traffic = (8.0 * (32.2 / 256.0) * 4.5) / 8.0
+    assert pytest.approx(res.routed_weight_traffic_gb, rel=1e-5) == expected_routed_traffic
+
+    # Mismatched split should raise ValueError
+    with pytest.raises(ValueError, match="Parameter split mismatch"):
+        evaluate_moe_decode(
+            total_experts=256,
+            resident_experts=256,
+            top_k=8,
+            shared_params_b=2.8,
+            total_params_b=35.84,
+            routed_params_b=30.0,  # 2.8 + 30.0 + 0.84 = 33.64 != 35.84
+            mtp_params_b=0.84,
+            bits_per_param=4.5,
+            batch_size=1,
+            kv_cache_per_sequence_gb=0.168,
+            card_sustained_bw_tb_s=1.434,
+        )
+
+    # Invalid mtp_params_b
+    with pytest.raises(ValueError, match="mtp_params_b"):
+        evaluate_moe_decode(
+            total_experts=256,
+            resident_experts=256,
+            top_k=8,
+            shared_params_b=2.8,
+            total_params_b=35.84,
+            routed_params_b=32.2,
+            mtp_params_b=-0.84,
+            bits_per_param=4.5,
+            batch_size=1,
+            kv_cache_per_sequence_gb=0.168,
+            card_sustained_bw_tb_s=1.434,
+        )
+
+
+
 
 

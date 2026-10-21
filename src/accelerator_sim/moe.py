@@ -162,6 +162,8 @@ def evaluate_moe_decode(
     mode: str = "text_only",
     execute_vision_encoder: bool = False,
     embedding_precision_bits: float = 16.0,
+    routed_params_b: float | None = None,
+    mtp_params_b: float = 0.0,
 ) -> MoEOffloadResult:
     """Evaluates MoE decode throughput ceiling with on-card and host offloading.
 
@@ -259,7 +261,26 @@ def evaluate_moe_decode(
     if hidden_size is not None and (not math.isfinite(hidden_size) or hidden_size <= 0):
         raise ValueError("hidden_size must be a positive integer")
 
-    routed_total_b = total_params_b - shared_params_b
+    if not math.isfinite(mtp_params_b) or mtp_params_b < 0:
+        raise ValueError(f"mtp_params_b must be a non-negative finite number, got {mtp_params_b}")
+
+    if routed_params_b is not None:
+        if not math.isfinite(routed_params_b) or routed_params_b <= 0:
+            raise ValueError(f"routed_params_b must be a positive finite number, got {routed_params_b}")
+        if not math.isclose(shared_params_b + routed_params_b + mtp_params_b, total_params_b, abs_tol=0.2):
+            raise ValueError(
+                f"Parameter split mismatch: shared ({shared_params_b}B) + routed ({routed_params_b}B) + "
+                f"mtp ({mtp_params_b}B) != total ({total_params_b}B)"
+            )
+        routed_total_b = routed_params_b
+    else:
+        routed_total_b = total_params_b - shared_params_b - mtp_params_b
+        if routed_total_b <= 0:
+            raise ValueError(
+                f"Computed routed parameters ({routed_total_b}B) must be positive. "
+                f"Check total_params_b ({total_params_b}B), shared_params_b ({shared_params_b}B), and mtp_params_b ({mtp_params_b}B)."
+            )
+
     expert_b = routed_total_b / float(total_experts)
     nonresident_experts = total_experts - resident_experts
 

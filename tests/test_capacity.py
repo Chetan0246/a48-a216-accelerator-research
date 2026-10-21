@@ -251,6 +251,9 @@ def test_load_workloads_config_includes_qwen_35b():
     assert qwen.effective_streamed_shared_params_b == 1.94
     assert qwen.embedding_precision_bits == 16.0
     assert qwen.mtp_params_b == 0.0
+    assert qwen.mtp_enabled is False
+    assert qwen.deployment_mode == "base_non_speculative"
+    assert qwen.inference_mode == "text_only"
     assert qwen.num_experts == 256
     assert qwen.experts_per_token == 8
     assert qwen.is_complete is True
@@ -261,6 +264,23 @@ def test_load_workloads_config_includes_qwen_35b():
     assert qwen.hybrid_attention["gated_attention_layers"] == 10
     assert qwen.hybrid_attention["linear_state_precision_bits"] == 32.0
     assert qwen.hybrid_attention["conv_channels"] == 8192
+
+    # Verify multimodal preset
+    assert "qwen-3.6-35b-a3b-multimodal" in workloads
+    qwen_mm = workloads["qwen-3.6-35b-a3b-multimodal"]
+    assert qwen_mm.total_parameters_b == 35.0
+    assert qwen_mm.deployment_mode == "base_non_speculative"
+    assert qwen_mm.inference_mode == "multimodal"
+    assert qwen_mm.image_tokens_per_seq == 576
+    assert qwen_mm.vision_params_b == 0.35
+
+    # Verify MTP speculative checkpoint preset
+    assert "qwen-3.6-35b-a3b-mtp" in workloads
+    qwen_mtp = workloads["qwen-3.6-35b-a3b-mtp"]
+    assert qwen_mtp.total_parameters_b == 35.84
+    assert qwen_mtp.mtp_params_b == 0.84
+    assert qwen_mtp.mtp_enabled is True
+    assert qwen_mtp.deployment_mode == "speculative_mtp"
 
     # Verify incomplete MLA workload is loaded with complete=False
     assert "deepseek-v2-lite" in workloads
@@ -310,5 +330,77 @@ def test_capacity_non_finite_inputs():
             num_kv_heads=32,
             head_dim=128,
             mtp_params_b=-1.0,
+        )
+    with pytest.raises(ValueError, match="deployment_mode"):
+        WorkloadConfig(
+            key="bad_dep_mode",
+            name="Bad Dep Mode",
+            total_parameters_b=7.0,
+            active_parameters_b=7.0,
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=32,
+            head_dim=128,
+            deployment_mode="unknown_mode",
+        )
+    with pytest.raises(ValueError, match="base_non_speculative.*mtp_params_b == 0.0"):
+        WorkloadConfig(
+            key="bad_base_mtp",
+            name="Bad Base MTP",
+            total_parameters_b=7.84,
+            active_parameters_b=7.0,
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=32,
+            head_dim=128,
+            deployment_mode="base_non_speculative",
+            mtp_params_b=0.84,
+        )
+    with pytest.raises(ValueError, match="speculative_mtp.*requires mtp_params_b > 0.0"):
+        WorkloadConfig(
+            key="bad_spec_mtp",
+            name="Bad Spec MTP",
+            total_parameters_b=7.0,
+            active_parameters_b=7.0,
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=32,
+            head_dim=128,
+            deployment_mode="speculative_mtp",
+            mtp_params_b=0.0,
+            mtp_enabled=True,
+        )
+    with pytest.raises(ValueError, match="multimodal.*requires vision_params_b > 0.0"):
+        WorkloadConfig(
+            key="bad_mm_no_vision",
+            name="Bad MM No Vision",
+            total_parameters_b=7.0,
+            active_parameters_b=7.0,
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=32,
+            head_dim=128,
+            inference_mode="multimodal",
+            vision_params_b=0.0,
+            image_tokens_per_seq=576,
+        )
+    with pytest.raises(ValueError, match="multimodal.*requires image_tokens_per_seq > 0"):
+        WorkloadConfig(
+            key="bad_mm_no_tokens",
+            name="Bad MM No Tokens",
+            total_parameters_b=7.35,
+            active_parameters_b=7.0,
+            num_layers=32,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_kv_heads=32,
+            head_dim=128,
+            inference_mode="multimodal",
+            vision_params_b=0.35,
+            image_tokens_per_seq=0,
         )
 

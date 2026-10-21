@@ -125,4 +125,23 @@ def test_cli_phase_aware_and_prefill_breakdown(capsys):
     assert "Vision Tower Weights:    0.197 GB/step (executed this step)" in captured_vis
 
 
+def test_cli_qwen_multimodal_and_mtp_presets(capsys):
+    """Tests CLI execution for explicit multimodal and MTP speculative checkpoint presets."""
+    # 1. Multimodal preset
+    main(["--system", "A48", "--workload", "qwen-3.6-35b-a3b-multimodal", "--batch", "4"])
+    captured_mm = capsys.readouterr().out
+    assert "19.688 GB" in captured_mm
+    assert "One-Time Vision Stage: 1.613 TFLOP (576 image tokens/seq, 0.197 GB stage weight traffic)" in captured_mm
+    assert "Vision Tower:       1.613 TFLOP" in captured_mm
+    assert "161.279 TFLOP" in captured_mm
+    assert "Vision Tower Weights:    0.000 GB/step (excluded in text-only mode)" in captured_mm
+
+    # 2. MTP speculative checkpoint preset
+    main(["--system", "A48", "--workload", "qwen-3.6-35b-a3b-mtp", "--batch", "4"])
+    captured_mtp = capsys.readouterr().out
+    assert "20.160 GB (4.50 bits/param; incl. 0.84B MTP auxiliary weights)" in captured_mtp
+    assert "Speculative MTP Note: Speculative draft-verification throughput modeling is deferred" in captured_mtp
+
+
+
 

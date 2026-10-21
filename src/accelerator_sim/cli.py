@@ -23,6 +23,7 @@ try:
         calculate_prefill_compute_breakdown,
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
+        calculate_vision_encoding_stage,
     )
 except (ImportError, ValueError):
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,6 +47,7 @@ except (ImportError, ValueError):
         calculate_prefill_compute_breakdown,
         calculate_prefill_tflop,
         calculate_required_prefill_throughput,
+        calculate_vision_encoding_stage,
     )
 
 
@@ -115,8 +117,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--mode",
         choices=("text_only", "multimodal"),
-        default="text_only",
-        help="Inference mode (text_only or multimodal)",
+        default=None,
+        help="Inference mode (text_only or multimodal; defaults to workload config)",
+    )
+    p.add_argument(
+        "--image-tokens",
+        type=int,
+        default=576,
+        help="Image patch tokens per sequence for multimodal vision encoding",
+    )
+    p.add_argument(
+        "--deployment-mode",
+        choices=("base_non_speculative", "speculative_mtp"),
+        default=None,
+        help="Deployment mode for MTP auxiliary weights",
     )
     p.add_argument("--ttft-seconds", type=float, default=3.0, help="Target prefill time budget in seconds")
     p.add_argument("--peak-fp16-tflops", type=float, default=0.0, help="Peak FP16 TFLOP/s (0 disables ceiling)")
@@ -196,6 +210,8 @@ def main(argv=None):
             is_complete=True,
         )
 
+    mode = args.mode if args.mode is not None else (wl.inference_mode if wl is not None else "text_only")
+
     # Hardware specs
     physical_mem_gb = sys_cfg.memory_capacity_gb
     peak_bw_tb_s = sys_cfg.peak_bandwidth_tb_s
@@ -242,7 +258,10 @@ def main(argv=None):
         print("=" * 70)
 
         print(f"\n[1] MEMORY CAPACITY EVALUATION (MoE {params_b:.1f}B - Hybrid Attention Breakdown)")
-        print(f"  - Stored Weights:       {cap_eval.weights_gb:.3f} GB ({bits_per_param:.2f} bits/param)")
+        if wl is not None and wl.mtp_params_b > 0:
+            print(f"  - Stored Weights:       {cap_eval.weights_gb:.3f} GB ({bits_per_param:.2f} bits/param; incl. {wl.mtp_params_b:.2f}B MTP auxiliary weights)")
+        else:
+            print(f"  - Stored Weights:       {cap_eval.weights_gb:.3f} GB ({bits_per_param:.2f} bits/param)")
         print(f"  - Persistent State Breakdown (Batch: {args.batch}, Context: {args.context:,}):")
         print(f"    * Gated Attention KV ({hybrid_cfg.gated_attention_layers} layers, {hybrid_cfg.attn_precision_bits:g}-bit):   {h_breakdown.attn_kv_gb_per_seq:.3f} GB/seq ({h_breakdown.attn_kv_batch_gb:.3f} GB batch)")
         print(f"    * Gated DeltaNet State ({hybrid_cfg.gated_deltanet_layers} layers, {hybrid_cfg.linear_state_precision_bits:g}-bit): {h_breakdown.recurrent_state_gb_per_seq:.3f} GB/seq ({h_breakdown.recurrent_state_batch_gb:.3f} GB batch)")
@@ -282,9 +301,11 @@ def main(argv=None):
             output_head_params_b=wl.output_head_params_b if (args.workload and wl is not None) else None,
             vision_params_b=wl.vision_params_b if (args.workload and wl is not None) else None,
             hidden_size=wl.hidden_size if (args.workload and wl is not None) else None,
-            mode=args.mode,
+            mode=mode,
             execute_vision_encoder=args.execute_vision_encoder,
             embedding_precision_bits=embedding_prec,
+            routed_params_b=wl.routed_expert_params_b if (args.workload and wl is not None) else None,
+            mtp_params_b=wl.mtp_params_b if (args.workload and wl is not None and wl.mtp_params_b is not None) else 0.0,
         )
 
         print(f"\n[2] MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE {params_b:.1f}B)")
@@ -295,6 +316,8 @@ def main(argv=None):
         print(f"  - Expected Nonresident: {moe_res.expected_nonresident_union:.4f} unique experts")
 
         print("\n[3] DECODE THROUGHPUT CEILING (MoE - Hybrid Cache Traffic)")
+        if wl is not None and wl.deployment_mode == "speculative_mtp":
+            print("  - Speculative MTP Note: Speculative draft-verification throughput modeling is deferred pending empirical calibration.")
         print(f"  - Card Weight Traffic:  {moe_res.card_weight_traffic_gb:.3f} GB/step ({moe_res.card_step_time_ms:.2f} ms)")
         print("  - Card Weight Traffic Breakdown:")
         print(f"    * Streamed Shared Weights: {moe_res.streamed_shared_traffic_gb:.3f} GB/step ({moe_res.streamed_shared_params_b:.2f}B params: backbone + LM head)")
@@ -332,6 +355,17 @@ def main(argv=None):
         print(f"  - Primary Limiter:      {moe_res.limiting_factor}")
 
         if wl is not None and wl.shared_backbone_params_b is not None:
+            img_tokens = args.image_tokens if mode == "multimodal" else 0
+            if mode == "multimodal" and wl.vision_params_b and wl.vision_params_b > 0:
+                vis_stage = calculate_vision_encoding_stage(
+                    vision_params_b=wl.vision_params_b,
+                    image_tokens_per_seq=args.image_tokens,
+                    bits_per_param=bits_per_param,
+                    batch_size=args.batch,
+                )
+            else:
+                vis_stage = None
+
             prefill_breakdown = calculate_prefill_compute_breakdown(
                 prompt_tokens=args.prompt_tokens,
                 batch_size=args.batch,
@@ -342,12 +376,15 @@ def main(argv=None):
                 output_head_params_b=wl.output_head_params_b or 0.0,
                 embedding_params_b=wl.embedding_params_b or 0.0,
                 vision_params_b=wl.vision_params_b or 0.0,
-                mode=args.mode,
+                mode=mode,
+                vision_tokens_per_seq=img_tokens,
                 logit_positions=args.logit_positions,
             )
             prefill_tflop = prefill_breakdown.total_tflop
             req_tflops = calculate_required_prefill_throughput(prefill_tflop, args.ttft_seconds)
             print(f"\n[4] PREFILL COMPUTE ESTIMATE (Prompt: {args.prompt_tokens:,} tokens/seq, Batch: {args.batch}, Logit Positions: {args.logit_positions})")
+            if vis_stage is not None:
+                print(f"  - One-Time Vision Stage: {vis_stage.vision_compute_tflop:.3f} TFLOP ({args.image_tokens} image tokens/seq, {vis_stage.vision_weight_traffic_gb:.3f} GB stage weight traffic)")
             print(f"  - Active Compute Params:{prefill_breakdown.active_compute_params_b:.2f}B (reconciled text forward pass)")
             print(f"  - Dense-equivalent Work:{prefill_tflop:.3f} TFLOP (Detailed breakdown across categories)")
             print(f"    * Backbone Work:      {prefill_breakdown.shared_backbone_tflop:.3f} TFLOP (2 * P_backbone * S * B)")
@@ -355,7 +392,7 @@ def main(argv=None):
             print(f"    * Output LM Head:     {prefill_breakdown.output_head_tflop:.4f} TFLOP (2 * P_head * {args.logit_positions} * B; logits_to_keep={args.logit_positions})")
             print(f"    * Embedding Lookup:   {prefill_breakdown.embedding_lookup_tflop:.1f} TFLOP (sparse gather, 0 GEMM FLOPs)")
             if prefill_breakdown.vision_tflop > 0:
-                print(f"    * Vision Tower:       {prefill_breakdown.vision_tflop:.3f} TFLOP")
+                print(f"    * Vision Tower:       {prefill_breakdown.vision_tflop:.3f} TFLOP (multimodal prefill GEMMs)")
             print(f"  - Target TTFT Budget:   {args.ttft_seconds:.2f} s")
             print(f"  - Required Throughput:  {req_tflops:.1f} effective TFLOP/s")
         else:
@@ -462,9 +499,11 @@ def main(argv=None):
             output_head_params_b=wl.output_head_params_b if (args.workload and wl is not None) else None,
             vision_params_b=wl.vision_params_b if (args.workload and wl is not None) else None,
             hidden_size=wl.hidden_size if (args.workload and wl is not None) else None,
-            mode=args.mode,
+            mode=mode,
             execute_vision_encoder=args.execute_vision_encoder,
             embedding_precision_bits=embedding_prec,
+            routed_params_b=wl.routed_expert_params_b if (args.workload and wl is not None) else None,
+            mtp_params_b=wl.mtp_params_b if (args.workload and wl is not None and wl.mtp_params_b is not None) else 0.0,
         )
         print(f"\n[1] MIXTURE-OF-EXPERTS TOPOLOGY & UNION (MoE {params_b:.1f}B)")
         print(f"  - Routed Experts:       {experts} total, top-{top_k} active/token")
@@ -498,7 +537,7 @@ def main(argv=None):
                 output_head_params_b=wl.output_head_params_b or 0.0,
                 embedding_params_b=wl.embedding_params_b or 0.0,
                 vision_params_b=wl.vision_params_b or 0.0,
-                mode=args.mode,
+                mode=mode,
                 logit_positions=args.logit_positions,
             )
             prefill_tflop = prefill_breakdown.total_tflop

@@ -85,6 +85,10 @@ class WorkloadConfig:
     streamed_shared_params_b: float | None = None
     embedding_precision_bits: float = 16.0
     mtp_params_b: float = 0.0
+    mtp_enabled: bool = False
+    deployment_mode: str = "base_non_speculative"
+    inference_mode: str = "text_only"
+    image_tokens_per_seq: int = 0
     is_complete: bool = True
     status: str = "supported"
     hybrid_attention: dict[str, Any] | None = None
@@ -134,6 +138,43 @@ class WorkloadConfig:
             raise ValueError("embedding_precision_bits must be positive")
         if self.mtp_params_b < 0:
             raise ValueError("mtp_params_b cannot be negative")
+
+        if self.deployment_mode not in ("base_non_speculative", "speculative_mtp"):
+            raise ValueError(
+                f"Invalid deployment_mode '{self.deployment_mode}'. Must be 'base_non_speculative' or 'speculative_mtp'"
+            )
+        if self.deployment_mode == "base_non_speculative":
+            if self.mtp_params_b != 0.0:
+                raise ValueError(
+                    f"base_non_speculative deployment for '{self.key}' requires mtp_params_b == 0.0, got {self.mtp_params_b}"
+                )
+            if self.mtp_enabled:
+                raise ValueError(
+                    f"base_non_speculative deployment for '{self.key}' cannot have mtp_enabled=True"
+                )
+        elif self.deployment_mode == "speculative_mtp":
+            if self.mtp_params_b <= 0.0:
+                raise ValueError(
+                    f"speculative_mtp deployment for '{self.key}' requires mtp_params_b > 0.0"
+                )
+            if not self.mtp_enabled:
+                raise ValueError(
+                    f"speculative_mtp deployment for '{self.key}' requires mtp_enabled=True"
+                )
+
+        if self.inference_mode not in ("text_only", "multimodal"):
+            raise ValueError(
+                f"Invalid inference_mode '{self.inference_mode}'. Must be 'text_only' or 'multimodal'"
+            )
+        if self.inference_mode == "multimodal":
+            if self.vision_params_b is None or self.vision_params_b <= 0.0:
+                raise ValueError(
+                    f"multimodal inference_mode for '{self.key}' requires vision_params_b > 0.0"
+                )
+            if self.image_tokens_per_seq <= 0:
+                raise ValueError(
+                    f"multimodal inference_mode for '{self.key}' requires image_tokens_per_seq > 0"
+                )
 
         if self.shared_params_b is not None:
             if not math.isfinite(self.shared_params_b):
@@ -199,12 +240,13 @@ class WorkloadConfig:
 
             # Validate split consistency if both are given
             if self.shared_params_b is not None and self.routed_expert_params_b is not None:
-                split_total = self.shared_params_b + self.routed_expert_params_b
+                split_total = self.shared_params_b + self.routed_expert_params_b + self.mtp_params_b
                 if abs(split_total - self.total_parameters_b) > ROUNDING_TOLERANCE_B:
                     raise ValueError(
                         f"Inconsistent parameter accounting for '{self.key}': "
                         f"shared_params_b ({self.shared_params_b}) + "
-                        f"routed_expert_params_b ({self.routed_expert_params_b}) = {split_total:.4f} "
+                        f"routed_expert_params_b ({self.routed_expert_params_b}) + "
+                        f"mtp_params_b ({self.mtp_params_b}) = {split_total:.4f} "
                         f"does not match total_parameters_b ({self.total_parameters_b}) "
                         f"within tolerance {ROUNDING_TOLERANCE_B}B."
                     )

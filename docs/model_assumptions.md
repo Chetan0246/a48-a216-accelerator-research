@@ -86,13 +86,17 @@ This document formalizes the mathematical equations, hardware simplifications, a
   - The vision tower encodes input image patches once per prompt sequence, producing image patch token embeddings:
     $$W_{\text{vision\_stage}} = \frac{P_{\text{vision}} \times \text{bits\_per\_param}}{8}$$
     $$F_{\text{vision\_stage}} = \frac{2 \times P_{\text{vision}} \times S_{\text{vision}} \times B}{1000}$$
-  - **Decode Phase Isolation**: Multimodal sessions do NOT stream vision-tower weights during output-token autoregressive generation. Each decode step generates text tokens and only processes language attention/recurrent states.
+  - For Qwen3.6-35B-A3B multimodal ($P_{\text{vision}} = 0.35\text{B}$, $S_{\text{vision}} = 576$ image tokens, 4.5 bpp, batch 1):
+    - One-time weight streaming traffic: $0.35 \times 4.5 / 8 = \mathbf{0.197\text{ decimal GB}}$.
+    - One-time prefill compute: $2 \times 0.35 \times 576 \times 1 / 1000 = \mathbf{0.4032\text{ TFLOP/seq}}$.
+  - **Scenario Matrix Reporting**: `scripts/run_scenarios.py` includes both text-only (`qwen-3.6-35b-a3b`) and multimodal (`qwen-3.6-35b-a3b-multimodal`) scenarios. For multimodal runs, `scenario_prefill.csv` explicitly reports `vision_stage_weight_traffic_gb` ($0.197\text{ GB}$) and `vision_stage_compute_tflop` ($0.403\text{ TFLOP}$) as one-time stage metrics alongside language prefill.
+  - **Decode Phase Isolation**: Multimodal sessions do NOT stream vision-tower weights during output-token autoregressive generation. Each decode step generates text tokens and only processes language attention/recurrent states. In `scenario_decode.csv`, `vision_weight_traffic_gb == 0.0`.
   - The parameter `execute_vision_encoder` defaults to `False` in `evaluate_moe_decode()`, ensuring vision weights are only streamed during decode if the caller explicitly requests an interleaved multimodal encoding step.
   - **Storage Constancy Preserved**: Regardless of whether inference is text-only or multimodal, the accelerator physical memory must hold all $35.0\text{B}$ parameters ($19.688\text{ GB}$). Model weights are never purged from physical capacity merely because they are idle during decode.
 
 ---
 
-## 4. Decode Phase Memory Bandwidth Ceilings (TPOT)
+## 5. Decode Phase Memory Bandwidth Ceilings (TPOT)
 - **Weight Streaming**: Shared model weights are read once per batch step across all concurrent sequences:
   $$W_{\text{traffic}} = \frac{P_{\text{B}} \times \text{bits\_per\_param}}{8}$$
 - **KV Cache Retrieval**: Each sequence in the batch reads its accumulated context:
@@ -104,36 +108,36 @@ This document formalizes the mathematical equations, hardware simplifications, a
 
 ---
 
-## 5. Mixture-of-Experts (MoE) Modeling Boundaries
+## 6. Mixture-of-Experts (MoE) Modeling Boundaries & Deployment Scope
 
 > [!CAUTION]
 > **Analytical First-Order Bound Notice**:
 > The MoE offload model provides an **analytical first-order throughput ceiling**, NOT a validated end-to-end performance predictor. Real systems exhibit routing skew, expert caching/pinning, PCIe DMA framing, and asynchronous compute/transfer pipelining.
 
 ### Parameter Accounting:
-- Total parameters are explicitly split into shared and routed components:
-  $$P_{\text{total}} = P_{\text{shared}} + P_{\text{routed}}$$
+- Total parameters are explicitly split into shared, routed, and deployment-specific auxiliary components:
+  $$P_{\text{total}} = P_{\text{shared}} + P_{\text{routed}} + P_{\text{mtp}}$$
   where $P_{\text{shared}}$ includes embeddings, self-attention, layer norms, and router gating matrices.
 - Individual expert size: $P_{\text{expert}} = P_{\text{routed}} / E$.
 - Active parameters per token: $P_{\text{active}} = P_{\text{shared}} + k \times P_{\text{expert}}$.
   - **Qwen 3.6 35B A3B Parameter Accounting Reconciliation**:
-    - **Total parameters**: $35.0\text{B}$.
+    - **Total parameters**: $35.0\text{B}$ (base) / $35.84\text{B}$ (MTP speculative checkpoint).
     - **Routed expert parameters**: 40 layers $\times 256$ experts $\times (3 \times 2048 \times 512) = 32,212,254,720$ parameters ($\mathbf{32.21\text{B}} \approx 32.2\text{B}$).
     - **Per-expert size**: $3 \times 2048 \times 512 = 3,145,728$ parameters ($0.00315\text{B}$).
     - **Active routed parameters per token** (top-8): $40 \times 8 \times 3,145,728 = 1,006,632,960$ parameters ($\mathbf{1.01\text{B}}$).
     - **Parameter Accounting & Explicit Categories**:
       - Total parameters stored on device must house all physical weights:
-        $$P_{\text{total}} = P_{\text{routed}} + P_{\text{non\_routed}} = 35.0\text{B}$$
+        $$P_{\text{total}} = P_{\text{routed}} + P_{\text{non\_routed}} + P_{\text{mtp}}$$
       - **Non-routed shared pool ($2.8\text{B}$)** is decomposed into four explicit categories:
         1. **Shared text-backbone weights** ($P_{\text{backbone}} = 1.43\text{B}$): 10 gated attention layers, 30 Gated DeltaNet linear attention layers, 40 shared experts, 40 routers, and layer norms.
         2. **Input embedding table** ($P_{\text{embed}} = 0.51\text{B}$): $248,320 \times 2048$ token embedding matrix ($0.5086\text{B}$).
         3. **Output LM head** ($P_{\text{head}} = 0.51\text{B}$): Untied language model projection head ($248,320 \times 2048$, $0.5086\text{B}$, `tie_word_embeddings: false`).
         4. **Vision tower / multimodal weights** ($P_{\text{vision}} = 0.35\text{B} - 0.41\text{B}$): Depth 27, hidden size 1152, intermediate 4304; residual multimodal parameters within $0.08\text{B}$ tolerance.
       - **Parameter Conservation Invariant**:
-        $$P_{\text{total}} = P_{\text{routed}} + P_{\text{backbone}} + P_{\text{embed}} + P_{\text{head}} + P_{\text{vision}}$$
+        $$P_{\text{total}} = P_{\text{routed}} + P_{\text{backbone}} + P_{\text{embed}} + P_{\text{head}} + P_{\text{vision}} + P_{\text{mtp}}$$
         Enforced strictly with validation rejecting inconsistent splits or unallocated parameters.
       - **Storage Constancy**:
-        Regardless of whether running text-only or multimodal inference, accelerator physical memory capacity must store all $35.0\text{B}$ parameters ($19.688\text{ GB}$ at 4.5 bpp). Weights are never removed from device storage merely because they are not streamed on every decode step.
+        Regardless of whether running text-only or multimodal inference, accelerator physical memory capacity must store all $35.0\text{B}$ parameters ($19.688\text{ GB}$ at 4.5 bpp) for the base deployment. Weights are never removed from device storage merely because they are not streamed on every decode step.
     - **Separation of Storage from Decode Weight Traffic**:
       The decode phase does not stream all stored weights on every step:
       1. **Shared text-backbone weights** ($P_{\text{backbone}} = 1.43\text{B}$): Streamed on each decode step ($1.43 \times 4.5 / 8 = 0.804\text{ GB}$).
@@ -150,8 +154,11 @@ This document formalizes the mathematical equations, hardware simplifications, a
       In text forward passes, active dense compute parameters are:
       $$P_{\text{active\_compute}} = P_{\text{backbone}} + k \times P_{\text{expert}} + P_{\text{head}} = 1.43 + 8 \times (32.2 / 256) + 0.51 = 2.946\text{B} \approx \mathbf{2.94\text{B}} \approx \mathbf{3.0\text{B}}$$
       This rigorously reconciles the published model card designation **A3B** (Active 3 Billion). Input embedding lookup is an $O(1)$ table index gather ($0.0$ GEMM FLOPs), and the vision tower is conditional multimodal-only ($0.0$ FLOPs for text generation).
-    - **Multi-Token Prediction (MTP) Parameter Inventory Scope**:
-      The official Qwen3.6-35B-A3B architecture specifies auxiliary multi-token prediction heads (`num_nextn_predict_layers: 1`) used for speculative decoding drafting. In standard non-speculative autoregressive serving (the scope of Workstreams A & B), auxiliary drafting layers are neither loaded into memory nor executed; `mtp_params_b = 0.0`. Speculative decoding modeling remains explicitly deferred.
+    - **Multi-Token Prediction (MTP) Deployment Scope**:
+      The official Qwen3.6-35B-A3B architecture specifies auxiliary multi-token prediction heads (`num_nextn_predict_layers: 1`) used for speculative decoding drafting. The simulator formalizes MTP as an explicit deployment configuration on `WorkloadConfig`:
+      - `deployment_mode: "base_non_speculative"` (`qwen-3.6-35b-a3b` and `qwen-3.6-35b-a3b-multimodal`): Standard serving engines (e.g., standard vLLM / SGLang) exclude the auxiliary draft layer from device memory. `mtp_params_b = 0.0`, `mtp_enabled = False`. Physical weight storage remains $35.0\text{B}$ ($19.688\text{ GB}$).
+      - `deployment_mode: "speculative_mtp"` (`qwen-3.6-35b-a3b-mtp`): When speculative MTP serving is enabled, the runtime loads the auxiliary drafting layer ($0.84\text{B}$ parameters) into device memory. `mtp_params_b = 0.84`, `mtp_enabled = True`. Stored capacity expands to $35.84\text{B}$ parameters ($20.160\text{ GB}$ at 4.5 bpp).
+      - **Speculative Throughput Deferral**: In `scripts/run_scenarios.py`, decode throughput for `speculative_mtp` is not calculated with a naive analytical multiplier. Instead, it is explicitly reported as `"deferred_speculative_mtp (requires empirical acceptance rate calibration)"` until empirical draft acceptance rates and verification kernel latencies are measured in Milestone 2.5.
   - **Mixtral Parameter Reconciliation**: Standard MoE without multimodal tower; active count is $1.5 + 2 \times (45.2 / 8) = 12.8\text{B}$.
 
 ### Mathematical Formulations:
@@ -183,7 +190,7 @@ This document formalizes the mathematical equations, hardware simplifications, a
 
 ---
 
-## 6. Calibration & Provenance Standards
+## 7. Calibration & Provenance Standards
 - **Unverified vs. Verified Records**:
   All entries in `benchmark_manifest.csv` must carry an explicit `verification_status`:
   - `unverified`: Literature or vendor-reported metrics where raw profiling traces and exact environment flags have not been independently reproduced locally.
